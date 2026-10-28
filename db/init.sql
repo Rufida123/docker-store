@@ -24,7 +24,9 @@ CREATE TABLE IF NOT EXISTS products (
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_products_category ON products (category);
+-- Product listing: newest first, optionally filtered by category.
+CREATE INDEX IF NOT EXISTS idx_products_created ON products (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_products_category_created ON products (category, created_at DESC);
 
 -- ===================== orders module =====================
 -- No foreign keys to users or products: each module owns its own tables and reaches
