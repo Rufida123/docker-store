@@ -34,11 +34,25 @@ services:
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN}
       ADMIN_EMAIL: ${ADMIN_EMAIL}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      # Firebase push notifications (optional): put the service account JSON in ./secrets
+      FIREBASE_SERVICE_ACCOUNT_FILE: /run/secrets/firebase-service-account.json
     ports:
       - "${PORT}:3000"
+    volumes:
+      - uploads:/app/uploads      # uploaded product images survive rebuilds
+      - ./secrets:/run/secrets:ro # never committed (see .gitignore)
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      # Firebase web config (public values, baked into the build). Empty = push turned off.
+      args:
+        VITE_FIREBASE_API_KEY: ${VITE_FIREBASE_API_KEY:-}
+        VITE_FIREBASE_AUTH_DOMAIN: ${VITE_FIREBASE_AUTH_DOMAIN:-}
+        VITE_FIREBASE_PROJECT_ID: ${VITE_FIREBASE_PROJECT_ID:-}
+        VITE_FIREBASE_MESSAGING_SENDER_ID: ${VITE_FIREBASE_MESSAGING_SENDER_ID:-}
+        VITE_FIREBASE_APP_ID: ${VITE_FIREBASE_APP_ID:-}
+        VITE_FIREBASE_VAPID_KEY: ${VITE_FIREBASE_VAPID_KEY:-}
     container_name: jwt_frontend
     restart: unless-stopped
     depends_on:
@@ -48,3 +62,4 @@ services:
 
 volumes:
   pgdata:
+  uploads:

@@ -2,7 +2,7 @@
   "info": {
     "name": "Docker Store API (v1)",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "description": "E-commerce modular monolith: users, products, orders.\n\nHow to run:\n1. Start the project: docker compose up --build -d\n   (after pulling a change to db/init.sql, reset the database first: docker compose down -v)\n2. If you changed PORT, ADMIN_EMAIL or ADMIN_PASSWORD in .env, update the collection variables host, adminEmail, adminPassword.\n3. Image uploads: in Postman Settings > General > Working directory, choose the project folder docs/test-files\n   (or pick docs/test-files/sample-product.png by hand in the \"image\" field of the upload requests).\n4. Run the whole collection in order (Collection Runner). Every request has tests.\n\nFolder 4 is the access-control proof: another customer's order, actions outside your role,\nmissing and forged tokens are all rejected. Folder 8 shows the login attempt limit.\n\nThe collection registers fresh accounts on every run, so it can be run again without a reset."
+    "description": "E-commerce modular monolith: users, products, orders, notifications.\n\nHow to run:\n1. Start the project: docker compose up --build -d\n   (after pulling a change to db/init.sql, reset the database first: docker compose down -v)\n2. If you changed PORT, ADMIN_EMAIL or ADMIN_PASSWORD in .env, update the collection variables host, adminEmail, adminPassword.\n3. Image uploads: in Postman Settings > General > Working directory, choose the project folder docs/test-files\n   (or pick docs/test-files/sample-product.png by hand in the \"image\" field of the upload requests).\n4. Run the whole collection in order (Collection Runner). Every request has tests.\n\nFolder 4 is the access-control proof: another customer's order, actions outside your role,\nmissing and forged tokens are all rejected. Folder 8 shows the login attempt limit, folder 9 the notifications.\n\nThe collection registers fresh accounts on every run, so it can be run again without a reset."
   },
   "event": [
     {
@@ -2451,6 +2451,383 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test('200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "9. Notifications",
+      "description": "Every order change creates a notification for the customer who placed the order. Customers only ever see their own.",
+      "item": [
+        {
+          "name": "Customer A lists notifications",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{tokenA}}"
+              }
+            ],
+            "url": "{{host}}/api/v1/notifications"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "pm.test('200 with pagination and unread_count', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(body.pagination).to.include.keys('page', 'limit', 'total', 'total_pages');",
+                  "  pm.expect(body.unread_count).to.be.a('number');",
+                  "});",
+                  "pm.test('Only A\\'s notifications, one per order event', () => {",
+                  "  pm.expect(body.data.length).to.be.above(0);",
+                  "  body.data.forEach((n) => pm.expect(n.user_id).to.eql(pm.collectionVariables.get('userIdA')));",
+                  "  const titles = body.data.map((n) => n.title);",
+                  "  pm.expect(titles).to.include.members(['Order placed', 'Order confirmed', 'Order shipped', 'Order delivered']);",
+                  "});",
+                  "pm.collectionVariables.set('notificationIdA', body.data[0].id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Filter: unread only",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{tokenA}}"
+              }
+            ],
+            "url": "{{host}}/api/v1/notifications?is_read=false"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200, all unread', () => { pm.response.to.have.status(200); pm.response.json().data.forEach((n) => pm.expect(n.is_read).to.eql(false)); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Filter: status updates only",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{tokenA}}"
+              }
+            ],
+            "url": "{{host}}/api/v1/notifications?type=order_status_changed"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200, all order_status_changed', () => { pm.response.to.have.status(200); pm.response.json().data.forEach((n) => pm.expect(n.type).to.eql('order_status_changed')); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Invalid filter value",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{tokenA}}"
+              }
+            ],
+            "url": "{{host}}/api/v1/notifications?is_read=maybe"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 VALIDATION_ERROR', () => {",
+                  "  pm.response.to.have.status(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Mark one as read",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{tokenA}}"
+              }
+            ],
+            "url": "{{host}}/api/v1/notifications/{{notificationIdA}}/read"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200, is_read true with read_at', () => { pm.response.to.have.status(200); const n = pm.response.json(); pm.expect(n.is_read).to.eql(true); pm.expect(n.read_at).to.be.a('string'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Customer B reads A's notification",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{tokenB}}"
+              }
+            ],
+            "url": "{{host}}/api/v1/notifications/{{notificationIdA}}",
+            "description": "Same 404 as a missing notification: B cannot even tell it exists."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 NOTIFICATION_NOT_FOUND', () => {",
+                  "  pm.response.to.have.status(404);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('NOTIFICATION_NOT_FOUND');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Customer B marks A's notification as read",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{tokenB}}"
+              }
+            ],
+            "url": "{{host}}/api/v1/notifications/{{notificationIdA}}/read"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 NOTIFICATION_NOT_FOUND', () => {",
+                  "  pm.response.to.have.status(404);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('NOTIFICATION_NOT_FOUND');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Mark all as read",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{tokenA}}"
+              }
+            ],
+            "url": "{{host}}/api/v1/notifications/read-all"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 with the number updated', () => { pm.response.to.have.status(200); pm.expect(pm.response.json().updated).to.be.a('number'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Nothing unread any more",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{tokenA}}"
+              }
+            ],
+            "url": "{{host}}/api/v1/notifications?is_read=false"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200, unread_count 0', () => { pm.response.to.have.status(200); pm.expect(pm.response.json().unread_count).to.eql(0); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Register this browser for push",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{tokenA}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{host}}/api/v1/notifications/devices",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"{{pushToken}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "In the app the token comes from Firebase (getToken). Here a test value is used."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('pushToken', 'postman-test-token-' + Date.now());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 registered (push_enabled shows whether the server has Firebase)', () => { pm.response.to.have.status(201); pm.expect(pm.response.json().registered).to.eql(true); pm.expect(pm.response.json().push_enabled).to.be.a('boolean'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Register without a token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{tokenA}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{host}}/api/v1/notifications/devices",
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 VALIDATION_ERROR', () => {",
+                  "  pm.response.to.have.status(400);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Stop push to this browser (sign out)",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{tokenA}}"
+              }
+            ],
+            "url": "{{host}}/api/v1/notifications/devices/{{pushToken}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Notifications without a token",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{host}}/api/v1/notifications"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 UNAUTHORIZED', () => {",
+                  "  pm.response.to.have.status(401);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('UNAUTHORIZED');",
+                  "});"
                 ]
               }
             }

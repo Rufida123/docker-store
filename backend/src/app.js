@@ -16,6 +16,9 @@ app.use(express.json());
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
+// Uploaded product images (static files, not part of the versioned API).
+app.use(products.imagesPath, products.images);
+
 // The OpenAPI document remains a standalone YAML file so it can be used by tools
 // outside this application as well as by Swagger UI.
 const openApiSpec = path.resolve(__dirname, '../../docs/openapi.yaml');
