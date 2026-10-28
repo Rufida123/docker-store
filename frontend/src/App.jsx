@@ -13,6 +13,7 @@ const OrderDetail = lazy(() => import('./pages/OrderDetail'));
 const Users = lazy(() => import('./pages/Users'));
 const Products = lazy(() => import('./pages/Products'));
 const ProductDetail = lazy(() => import('./pages/ProductDetail'));
+const Notifications = lazy(() => import('./pages/Notifications'));
 
 export default function App() {
   return (
@@ -41,6 +42,14 @@ export default function App() {
           <Route path="/orders/:id" element={<OrderDetail />} />
           <Route path="/products" element={<Products />} />
           <Route path="/products/:id" element={<ProductDetail />} />
+          <Route
+            path="/notifications"
+            element={
+              <ProtectedRoute roles={['customer']}>
+                <Notifications />
+              </ProtectedRoute>
+            }
+          />
           <Route
             path="/users"
             element={

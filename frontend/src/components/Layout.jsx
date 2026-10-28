@@ -32,10 +32,13 @@ import DarkModeIcon from '@mui/icons-material/DarkModeOutlined';
 import LightModeIcon from '@mui/icons-material/LightModeOutlined';
 import StorefrontIcon from '@mui/icons-material/Storefront';
 import Inventory2Icon from '@mui/icons-material/Inventory2Outlined';
+import NotificationsIcon from '@mui/icons-material/NotificationsNoneOutlined';
 import { useAuth } from '../context/AuthContext';
 import { useColorMode } from '../theme';
 import { initials } from '../utils/format';
 import PageLoader from './PageLoader';
+import NotificationBell from './NotificationBell';
+import PushBridge from './PushBridge';
 
 const DRAWER_WIDTH = 264;
 
@@ -72,7 +75,10 @@ export default function Layout() {
     { to: '/orders', label: 'Orders', icon: <ReceiptLongIcon />, match: (p) => p.startsWith('/orders') && p !== '/orders/new' },
     { to: '/products', label: 'Products', icon: <Inventory2Icon />, match: (p) => p.startsWith('/products') },
     ...(!isAdmin
-      ? [{ to: '/orders/new', label: 'New order', icon: <AddShoppingCartIcon />, match: (p) => p === '/orders/new' }]
+      ? [
+          { to: '/orders/new', label: 'New order', icon: <AddShoppingCartIcon />, match: (p) => p === '/orders/new' },
+          { to: '/notifications', label: 'Notifications', icon: <NotificationsIcon />, match: (p) => p.startsWith('/notifications') },
+        ]
       : []),
     ...(isAdmin ? [{ to: '/users', label: 'Users', icon: <PeopleIcon />, match: (p) => p.startsWith('/users') }] : []),
   ];
@@ -148,6 +154,8 @@ export default function Layout() {
 
   return (
     <Box sx={{ display: 'flex', minHeight: '100vh' }}>
+      {/* Notifications belong to the customer who placed the order. */}
+      {!isAdmin && <PushBridge />}
       {/* Keyboard users can jump straight past the navigation. */}
       <Button
         href="#main"
@@ -186,6 +194,7 @@ export default function Layout() {
             {current?.label || 'Orders'}
           </Typography>
           <Box sx={{ flexGrow: 1 }} />
+          {!isAdmin && <NotificationBell />}
           <Tooltip title={mode === 'dark' ? 'Light mode' : 'Dark mode'}>
             <IconButton onClick={toggle} aria-label="Toggle color mode">
               {mode === 'dark' ? <LightModeIcon /> : <DarkModeIcon />}

@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { api, getStoredAuth, storeAuth, STORAGE_KEY } from '../api/client';
 import { clearCache } from '../hooks/useQuery';
+import { releasePush } from '../push/push';
 
 const AuthContext = createContext(null);
 export const useAuth = () => useContext(AuthContext);
@@ -29,6 +30,8 @@ export function AuthProvider({ children }) {
   const [sessionExpired, setSessionExpired] = useState(false);
 
   const logout = useCallback(() => {
+    // This browser stops receiving the account's push notifications (sent before the token is cleared).
+    releasePush(getStoredAuth()?.token);
     storeAuth(null);
     clearCache(); // never leak one user's cached data to the next
     setAuth(null);

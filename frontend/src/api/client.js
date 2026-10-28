@@ -46,11 +46,12 @@ function buildUrl(path, params) {
   return `${BASE}${path}${q ? `?${q}` : ''}`;
 }
 
-async function request(path, { method = 'GET', body, params, auth = true } = {}) {
+// bearer: send this token instead of the stored one (used while signing out).
+async function request(path, { method = 'GET', body, params, auth = true, bearer } = {}) {
   const isForm = body instanceof FormData;
   const headers = { Accept: 'application/json' };
   if (body !== undefined && !isForm) headers['Content-Type'] = 'application/json';
-  const sentToken = auth ? getStoredAuth()?.token : null;
+  const sentToken = auth ? bearer || getStoredAuth()?.token : null;
   if (sentToken) headers.Authorization = `Bearer ${sentToken}`;
 
   // A request can never hang forever: abort after a timeout (longer for uploads).
@@ -121,6 +122,14 @@ export const api = {
   createOrder: (body) => request('/orders', { method: 'POST', body }),
   changeStatus: (id, status) =>
     request(`/orders/${id}/status`, { method: 'PATCH', body: { status } }),
+  // --- notifications (always the signed-in user's own)
+  listNotifications: (params) => request('/notifications', { params }),
+  markNotificationRead: (id) => request(`/notifications/${id}/read`, { method: 'PATCH' }),
+  markAllNotificationsRead: () => request('/notifications/read-all', { method: 'PATCH' }),
+  // --- push: this browser's Firebase token
+  registerDevice: (token) => request('/notifications/devices', { method: 'POST', body: { token } }),
+  unregisterDevice: (token, bearer) =>
+    request(`/notifications/devices/${encodeURIComponent(token)}`, { method: 'DELETE', bearer }),
 };
 
 // ---------------------------------------------------------------------------

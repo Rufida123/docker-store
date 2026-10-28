@@ -43,6 +43,19 @@ export const useOrders = (params, opts) =>
 export const prefetchOrders = (params) => prefetch(['orders', params], () => api.listOrders(params));
 export const useOrder = (id, opts) => useQuery(['order', id], () => api.getOrder(id), opts);
 
+// ---- notifications --------------------------------------------------------
+// The bell and the notifications page share the 'notifications' tag: marking one as read,
+// or a push arriving, refreshes both. The response also carries unread_count.
+export const useNotifications = (params, opts) =>
+  useQuery(['notifications', params], () => api.listNotifications(params), {
+    keepPrevious: true,
+    staleTime: 15_000,
+    ...opts,
+  });
+
+/** Something changed (read, read-all, push received): refetch the notification lists on screen. */
+export const notificationsChanged = () => invalidate('notifications');
+
 // ---- users (admin) -------------------------------------------------------
 async function fetchAllUsers() {
   const first = normalizeList(await api.users(), USER_KEYS);
@@ -74,7 +87,7 @@ export const productCreated = () => invalidate('products', 'catalog');
 /** An order was placed: remember it for the detail page; stock and lists changed. */
 export function orderPlaced(order) {
   if (order?.id) setQueryData(['order', order.id], order);
-  invalidate('orders', 'products', 'catalog', 'product');
+  invalidate('orders', 'products', 'catalog', 'product', 'notifications');
 }
 
 /** An order's status changed (the API returns the updated order). */

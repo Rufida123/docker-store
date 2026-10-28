@@ -4,13 +4,12 @@ export const ORDER_STATUSES = ['pending', 'confirmed', 'shipped', 'delivered', '
 // The happy path of an order.
 export const STATUS_FLOW = ['pending', 'confirmed', 'shipped', 'delivered'];
 
-// Allowed next statuses (the server enforces this too: skipping a step or changing
-// a delivered/cancelled order returns 409 INVALID_STATUS_TRANSITION).
-// If your backend allows different cancellations, adjust this map only.
+// Allowed next statuses, same as the server (orders.service.js). Anything else returns
+// 409 INVALID_STATUS_TRANSITION. A shipped order can no longer be cancelled.
 export const TRANSITIONS = {
   pending: ['confirmed', 'cancelled'],
   confirmed: ['shipped', 'cancelled'],
-  shipped: ['delivered', 'cancelled'],
+  shipped: ['delivered'],
   delivered: [],
   cancelled: [],
 };
@@ -43,6 +42,22 @@ export function formatDate(value) {
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return '—';
   return d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+// "just now", "5 minutes ago", "3 days ago"; older than a week falls back to the date.
+export function timeAgo(value) {
+  const d = new Date(value);
+  if (!value || Number.isNaN(d.getTime())) return '—';
+  const seconds = Math.max(0, Math.round((Date.now() - d.getTime()) / 1000));
+  if (seconds < 60) return 'just now';
+  if (seconds >= 7 * 24 * 3600) return formatDate(value);
+  for (const [size, unit] of [[24 * 3600, 'day'], [3600, 'hour'], [60, 'minute']]) {
+    if (seconds >= size) {
+      const n = Math.floor(seconds / size);
+      return `${n} ${unit}${n > 1 ? 's' : ''} ago`;
+    }
+  }
+  return 'just now';
 }
 
 export const shortId = (id) => (id ? String(id).slice(0, 8) : '—');
