@@ -98,6 +98,19 @@ CREATE INDEX IF NOT EXISTS idx_notifications_user_created
 CREATE INDEX IF NOT EXISTS idx_notifications_user_unread
   ON notifications (user_id, created_at DESC, id DESC) WHERE is_read = FALSE;
 
+-- Browsers that receive push notifications (Firebase Cloud Messaging) for a user.
+-- The FCM token identifies one browser. If another user signs in on that browser,
+-- the token moves to the new user, so pushes never reach the previous account's owner.
+CREATE TABLE IF NOT EXISTS notification_devices (
+  token         TEXT PRIMARY KEY,
+  user_id       UUID NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  user_agent    VARCHAR(300),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_notification_devices_user ON notification_devices (user_id);
+
 -- ===================== sample data =====================
 -- Fixed ids so the Postman collection can order them. Safe to remove once the
 -- products API can create products.

@@ -8,6 +8,19 @@ const router = express.Router();
 
 router.use(authenticate, authorize('customer', 'admin'));
 
+// POST /notifications/devices  body: { "token": "<FCM token of this browser>" }
+// Called by the front end after the user allowed notifications.
+router.post('/devices', asyncHandler(async (req, res) => {
+  res.status(201).json(await service.registerDevice(req.user, req.body || {}, req.get('user-agent')));
+}));
+
+// DELETE /notifications/devices/:token  (on sign out: this browser stops receiving pushes)
+router.delete('/devices/:token', asyncHandler(async (req, res) => {
+  await service.unregisterDevice(req.user, req.params.token);
+  res.status(204).end();
+}));
+
+// GET /notifications?page=&limit=&is_read=true|false&type=order_created|order_status_changed
 router.get('/', asyncHandler(async (req, res) => {
   res.json(await service.listForUser(req.user, req.query));
 }));

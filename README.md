@@ -17,8 +17,8 @@ Two containers: `db` (PostgreSQL) and `backend` (Express API).
       modules/
         users/            routes -> service -> repository  (finished)
         orders/           routes -> service -> repository  (finished)
-        products/         stock functions used by orders; the products API is not built yet
-        notifications/    routes -> service -> repository (persistent in-app notifications)
+        products/         routes -> service -> repository  (finished, + images)
+        notifications/    routes -> service -> repository  (in-app notifications + Firebase push)
 
 Rule: a module only imports another module through that module's `index.js`.
 
@@ -131,12 +131,52 @@ changed an order. List with `GET /api/v1/notifications?page=1&limit=20`; the res
 `PATCH /api/v1/notifications/:id/read`, or all of the caller's unread notifications with
 `PATCH /api/v1/notifications/read-all`.
 
-`db/init.sql` runs only when PostgreSQL initializes an empty data directory. For an existing volume,
-apply the non-destructive migration, then rebuild the backend:
+Filters: `?is_read=false` (unread only) and `?type=order_created|order_status_changed`.
+`total` counts the filtered list; `unread_count` is always all unread (for the bell badge).
+In the front end: a bell with the unread count (customers), and a Notifications page with filters.
 
-    Get-Content db/migrations/001_notifications.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
+`db/init.sql` runs only when PostgreSQL initializes an empty data directory. For an existing volume,
+apply the non-destructive migrations instead (works in PowerShell and bash), then rebuild:
+
+    Get-Content db/migrations/001_notifications.sql | docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+    Get-Content db/migrations/002_notification_devices.sql | docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+    docker compose up --build -d
 
 Do not use `docker compose down -v` merely to add this feature.
+
+### Push notifications (Firebase Cloud Messaging)
+
+Optional. Without Firebase everything works the same; notifications are only shown in the app
+(the bell refreshes every 30 s). With Firebase, the customer also gets a browser notification when
+an order changes, even when no tab of the store is open.
+
+How it works:
+
+1. The customer clicks **Turn on** on the Notifications page; the browser asks for permission.
+2. The front end gets this browser's FCM token from Firebase and sends it to
+   `POST /api/v1/notifications/devices`. Signing out calls `DELETE /api/v1/notifications/devices/:token`.
+3. When an order is created or changes status, the orders module publishes an event **after its
+   transaction committed**; the notifications module sends the stored notification to all of the
+   customer's browsers through the Firebase Admin SDK, and deletes tokens Firebase rejects.
+4. The service worker (`frontend/public/firebase-messaging-sw.js`) shows it: a toast in a focused
+   tab, otherwise a system notification; clicking it opens the order.
+
+Setup (Firebase console, https://console.firebase.google.com):
+
+1. Create a project, then **Project settings > General > Your apps > Add app > Web**.
+   Copy the config values into `.env`: `VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`,
+   `VITE_FIREBASE_PROJECT_ID`, `VITE_FIREBASE_MESSAGING_SENDER_ID`, `VITE_FIREBASE_APP_ID`.
+2. **Project settings > Cloud Messaging > Web Push certificates > Generate key pair**:
+   copy the key into `VITE_FIREBASE_VAPID_KEY`.
+3. **Project settings > Service accounts > Generate new private key**: save the downloaded file as
+   `secrets/firebase-service-account.json`. It is a private key: the `secrets` folder is ignored
+   by git and by the Docker build, and the file is mounted read-only into the backend container.
+4. Rebuild: `docker compose up --build -d`. The backend log says
+   `Push notifications are on (Firebase project: ...)`.
+
+Browsers only allow push on `https://` or `http://localhost` (not `http://<LAN IP>`).
+For local development without Docker, put the `VITE_FIREBASE_*` values in `frontend/.env.local`
+and set `FIREBASE_SERVICE_ACCOUNT_FILE` to the key's path when starting the backend.
 
 ## API documentation and tests
 
@@ -152,6 +192,8 @@ It registers fresh accounts on every run and tests every endpoint:
   products as a customer, ordering as admin, and missing or forged tokens are all rejected
 - folder "8. Login attempt limit": 5 failed logins for one email lock that email (from that IP)
   for 15 minutes, even with the right password; other accounts are not affected
+- folder "9. Notifications": list, filters, read / read-all, another customer's notification
+  (404), push device registration
 
 ## Useful commands
 
