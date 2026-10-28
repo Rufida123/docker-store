@@ -1,6 +1,7 @@
 // Business rules of the orders module (validation, stock, ownership, status changes).
 const repo = require('./orders.repository');
 const products = require('../products'); // only through the products module's index.js
+const notifications = require('../notifications'); // only through the notifications module's index.js
 const { withTransaction } = require('../../shared/transaction');
 const { publish } = require('../../shared/events');
 const { AppError } = require('../../shared/errors');
@@ -92,6 +93,12 @@ async function createOrder(user, body) {
       fromStatus: null,
       toStatus: 'pending',
       changedBy: user.id,
+    });
+    await notifications.createForOrderEvent(client, {
+      userId: user.id,
+      orderId: id,
+      type: 'order_created',
+      status: 'pending',
     });
     return id;
   });
@@ -196,6 +203,12 @@ async function changeStatus(user, id, body) {
       fromStatus: order.status,
       toStatus: status,
       changedBy: user.id,
+    });
+    await notifications.createForOrderEvent(client, {
+      userId: order.user_id,
+      orderId: order.id,
+      type: 'order_status_changed',
+      status,
     });
 
     return { orderId: order.id, userId: order.user_id, from: order.status, to: status, changedBy: user.id };

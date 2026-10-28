@@ -69,6 +69,35 @@ CREATE TABLE IF NOT EXISTS order_status_history (
 
 CREATE INDEX IF NOT EXISTS idx_order_status_history_order ON order_status_history (order_id, changed_at);
 
+-- ===================== notifications module =====================
+-- Notifications belong to a customer and are created in the same transaction as
+-- the order event that caused them. order_id/status also form a natural idempotency
+-- key for a particular order event.
+CREATE TABLE IF NOT EXISTS notifications (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     UUID NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  order_id    UUID NOT NULL REFERENCES orders (id) ON DELETE CASCADE,
+  type        VARCHAR(40) NOT NULL
+              CHECK (type IN ('order_created', 'order_status_changed')),
+  status      VARCHAR(20) NOT NULL
+              CHECK (status IN ('pending', 'confirmed', 'shipped', 'delivered', 'cancelled')),
+  title       VARCHAR(200) NOT NULL,
+  message     TEXT NOT NULL,
+  metadata    JSONB NOT NULL DEFAULT '{}'::jsonb,
+  is_read     BOOLEAN NOT NULL DEFAULT FALSE,
+  read_at     TIMESTAMPTZ,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CHECK ((is_read AND read_at IS NOT NULL) OR (NOT is_read AND read_at IS NULL)),
+  UNIQUE (order_id, type, status)
+);
+
+-- The list query is scoped to one user and sorted newest first.
+CREATE INDEX IF NOT EXISTS idx_notifications_user_created
+  ON notifications (user_id, created_at DESC, id DESC);
+-- Lets unread counts and unread-only future views avoid scanning read rows.
+CREATE INDEX IF NOT EXISTS idx_notifications_user_unread
+  ON notifications (user_id, created_at DESC, id DESC) WHERE is_read = FALSE;
+
 -- ===================== sample data =====================
 -- Fixed ids so the Postman collection can order them. Safe to remove once the
 -- products API can create products.

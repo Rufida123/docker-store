@@ -17,8 +17,8 @@ Two containers: `db` (PostgreSQL) and `backend` (Express API).
       modules/
         users/            routes -> service -> repository  (finished)
         orders/           routes -> service -> repository  (finished)
-        products/         routes -> service -> repository  (finished, + images)
-        notifications/    empty for now
+        products/         stock functions used by orders; the products API is not built yet
+        notifications/    routes -> service -> repository (persistent in-app notifications)
 
 Rule: a module only imports another module through that module's `index.js`.
 
@@ -62,7 +62,10 @@ Every URL is versioned under `/api/v1` (except `/health`).
 | GET    | /api/v1/orders               | customer: own orders only, admin: all orders |
 | GET    | /api/v1/orders/:id           | customer: own order only, admin: any order |
 | PATCH  | /api/v1/orders/:id/status    | admin only |
-| GET    | /uploads/products/<file>     | public (product images) |
+| GET    | /api/v1/notifications         | any logged-in user, own notifications |
+| GET    | /api/v1/notifications/:id     | any logged-in user, own notification |
+| PATCH  | /api/v1/notifications/:id/read | any logged-in user, own notification |
+| PATCH  | /api/v1/notifications/read-all | any logged-in user, own notifications |
 | GET    | /health                      | public |
 
 Errors always look like: `{ "error": { "code": "...", "message": "...", "details": [...] } }`
@@ -112,6 +115,22 @@ Any other change returns `409 INVALID_STATUS_TRANSITION`. Every change is kept i
 
 A customer asking for someone else's order gets `404 ORDER_NOT_FOUND`, the same answer as for an
 order that does not exist, so order ids can't be probed.
+
+### Notifications
+
+Creating an order and changing its status create persistent notifications for the order's customer
+inside the same database transaction. Notifications are never addressed to the administrator who
+changed an order. List with `GET /api/v1/notifications?page=1&limit=20`; the response is
+`{ "data": [...], "pagination": { ... }, "unread_count": 2 }`. A notification can be read with
+`PATCH /api/v1/notifications/:id/read`, or all of the caller's unread notifications with
+`PATCH /api/v1/notifications/read-all`.
+
+`db/init.sql` runs only when PostgreSQL initializes an empty data directory. For an existing volume,
+apply the non-destructive migration, then rebuild the backend:
+
+    Get-Content db/migrations/001_notifications.sql | docker compose exec -T db psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB
+
+Do not use `docker compose down -v` merely to add this feature.
 
 ## API documentation and tests
 
