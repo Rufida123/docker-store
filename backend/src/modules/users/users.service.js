@@ -8,10 +8,11 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 async function register({ email, password }) {
   const details = [];
-  if (!email || !EMAIL_RE.test(email)) {
+  // typeof checks: JSON can also send numbers or arrays, which must be a 400, not a crash.
+  if (typeof email !== 'string' || email.length > 255 || !EMAIL_RE.test(email)) {
     details.push({ field: 'email', message: 'A valid email is required' });
   }
-  if (!password || password.length < 8) {
+  if (typeof password !== 'string' || password.length < 8) {
     details.push({ field: 'password', message: 'Password must be at least 8 characters' });
   }
   if (details.length) {
@@ -35,7 +36,7 @@ async function register({ email, password }) {
 }
 
 async function login({ email, password }) {
-  if (!email || !password) {
+  if (typeof email !== 'string' || typeof password !== 'string' || !email || !password) {
     throw new AppError(400, 'VALIDATION_ERROR', 'Email and password are required');
   }
 

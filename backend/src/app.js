@@ -14,6 +14,9 @@ app.use(express.json());
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
+// Uploaded product images (static files, not part of the versioned API).
+app.use(products.imagesPath, products.images);
+
 // API version 1. Every module's URLs live under /api/v1, and each module owns its URLs.
 // A future breaking change goes under /api/v2 while v1 keeps working for existing clients.
 const v1 = express.Router();

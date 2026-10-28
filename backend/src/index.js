@@ -1,8 +1,11 @@
 const app = require('./app');
 const { ensureAdmin } = require('./modules/users');
 
-if (!process.env.JWT_SECRET) {
-  console.error('JWT_SECRET is not set');
+// Anyone who knows the secret can sign a token with role "admin", so refuse to start with
+// a missing, short, or placeholder secret (the one in .env.example is public).
+const secret = process.env.JWT_SECRET || '';
+if (secret.length < 32 || secret.startsWith('generate_with')) {
+  console.error('JWT_SECRET is missing or too weak. Generate one with: openssl rand -hex 64');
   process.exit(1);
 }
 
