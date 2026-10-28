@@ -32,6 +32,12 @@ Rule: a module only imports another module through that module's `index.js`.
 
 The API is at http://localhost:3000/api/v1
 
+Interactive API documentation is at http://localhost:3000/api-docs. The standalone OpenAPI 3.1
+document is [`docs/openapi.yaml`](docs/openapi.yaml). To call protected endpoints in Swagger UI,
+first use `POST /api/v1/auth/login`, copy its `token`, click **Authorize**, and enter the token
+in the Bearer authentication dialog. Public registration creates customer accounts; admin accounts
+come from `ADMIN_EMAIL` and `ADMIN_PASSWORD` at startup.
+
 **After pulling a change to `db/init.sql`** (new tables), reset the database once, otherwise the
 new tables are not created:
 

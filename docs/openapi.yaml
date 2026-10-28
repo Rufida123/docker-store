@@ -1,0 +1,588 @@
+openapi: 3.1.0
+info:
+  title: docker-store API
+  version: 1.1.0
+  description: |
+    API for customer registration, catalog management, orders, and product images.
+    Except for health checks and public catalog resources, endpoints use an HS256 JWT
+    obtained from the login operation. Amounts returned from PostgreSQL NUMERIC columns
+    are JSON strings, preserving decimal precision.
+servers:
+  - url: http://localhost:3000
+    description: Docker Compose development server (or the host port configured by PORT)
+tags:
+  - name: Health
+    description: Operational health check.
+  - name: Authentication
+    description: Customer registration and JWT authentication.
+  - name: Users
+    description: Admin user directory.
+  - name: Products
+    description: Public catalog and admin catalog management.
+  - name: Orders
+    description: Customer checkout and admin order fulfillment.
+paths:
+  /health:
+    get:
+      tags: [Health]
+      operationId: getHealth
+      summary: Check API health
+      security: []
+      responses:
+        '200':
+          description: API is running.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, const: ok }
+  /api/v1/auth/register:
+    post:
+      tags: [Authentication]
+      operationId: registerCustomer
+      summary: Register a customer
+      security: []
+      description: Public registration always creates a customer role; clients cannot select a role.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+            example: { email: jane@example.test, password: correct-horse-battery-staple }
+      responses:
+        '201':
+          description: Customer registered.
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/User' } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '409':
+          description: The email is already registered.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: { code: EMAIL_TAKEN, message: Email already registered } }
+  /api/v1/auth/login:
+    post:
+      tags: [Authentication]
+      operationId: login
+      summary: Log in and obtain a JWT
+      security: []
+      description: |
+        Failed attempts are limited to five per 15 minutes for each IP-address/email pair.
+        Click **Authorize** in Swagger UI and provide the returned token to call protected operations.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Authenticated.
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/TokenResponse' } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401':
+          description: Invalid credentials.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: { code: INVALID_CREDENTIALS, message: Invalid credentials } }
+        '429':
+          description: Too many failed attempts.
+          headers:
+            RateLimit-Limit: { schema: { type: integer }, description: Allowed attempts in the current window. }
+            RateLimit-Remaining: { schema: { type: integer }, description: Remaining attempts in the current window. }
+            RateLimit-Reset: { schema: { type: integer }, description: Seconds until the window resets. }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: { code: TOO_MANY_REQUESTS, message: Too many failed login attempts. Try again in 15 minutes. } }
+  /api/v1/auth/me:
+    get:
+      tags: [Authentication]
+      operationId: getCurrentUser
+      summary: Get the authenticated user
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Current user.
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/User' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/UserNotFound' }
+  /api/v1/users:
+    get:
+      tags: [Users]
+      operationId: listUsers
+      summary: List users
+      description: Available only to admins. The response is not paginated.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Users ordered newest first.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/User' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/products:
+    get:
+      tags: [Products]
+      operationId: listProducts
+      summary: List products
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/Category'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Products ordered newest first.
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/ProductPage' } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+    post:
+      tags: [Products]
+      operationId: createProduct
+      summary: Create a product
+      description: Admin only. Submit JSON when no image is needed, or multipart form data with an optional `image` field. Image content must be JPEG, PNG, or WebP and at most 2 MB.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProductCreate' }
+          multipart/form-data:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/ProductCreate'
+                - type: object
+                  properties:
+                    image:
+                      type: string
+                      format: binary
+                      description: Optional JPEG, PNG, or WebP image (2 MB maximum).
+      responses:
+        '201':
+          description: Product created.
+          headers:
+            Location: { schema: { type: string, format: uri-reference }, description: URL of the created product. }
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Product' } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413': { $ref: '#/components/responses/FileTooLarge' }
+  /api/v1/products/{id}:
+    parameters: [{ $ref: '#/components/parameters/UuidPath' }]
+    get:
+      tags: [Products]
+      operationId: getProduct
+      summary: Get a product
+      security: []
+      responses:
+        '200':
+          description: Product.
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Product' } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '404': { $ref: '#/components/responses/ProductNotFound' }
+    patch:
+      tags: [Products]
+      operationId: updateProduct
+      summary: Update product details
+      description: Admin only. Stock cannot be changed here; use the stock operation.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/ProductUpdate' } }
+      responses:
+        '200':
+          description: Updated product.
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Product' } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/ProductNotFound' }
+  /api/v1/products/{id}/stock:
+    parameters: [{ $ref: '#/components/parameters/UuidPath' }]
+    patch:
+      tags: [Products]
+      operationId: changeProductStock
+      summary: Change product stock by a relative amount
+      description: Admin only. The change is atomic and cannot reduce stock below zero.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StockChange' }
+            example: { change: -3 }
+      responses:
+        '200':
+          description: Product with updated stock.
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Product' } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/ProductNotFound' }
+        '409': { $ref: '#/components/responses/InsufficientStock' }
+  /uploads/products/{file}:
+    get:
+      tags: [Products]
+      operationId: getProductImage
+      summary: Retrieve an uploaded product image
+      security: []
+      description: Public static image resource. The opaque filename is returned in a product's `image_url`.
+      parameters:
+        - name: file
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Image bytes (JPEG, PNG, or WebP).
+          content:
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/png: { schema: { type: string, format: binary } }
+            image/webp: { schema: { type: string, format: binary } }
+        '404': { $ref: '#/components/responses/RouteNotFound' }
+  /api/v1/orders:
+    post:
+      tags: [Orders]
+      operationId: createOrder
+      summary: Create an order
+      description: Customer only. Product prices and ownership are derived from the database and token. Duplicate product IDs in `items` are combined.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OrderCreate' }
+      responses:
+        '201':
+          description: Order created and stock reserved.
+          headers:
+            Location: { schema: { type: string, format: uri-reference }, description: URL of the created order. }
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Order' } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/ProductNotFound' }
+        '409': { $ref: '#/components/responses/InsufficientStock' }
+    get:
+      tags: [Orders]
+      operationId: listOrders
+      summary: List orders
+      description: Customers receive only their own orders. Admins receive all orders and may filter by `user_id`.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/OrderStatus' }
+        - name: user_id
+          in: query
+          description: Admin-only filter; ignored for customers.
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Order headers ordered newest first. Items and history are only included by the single-order operations.
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/OrderPage' } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/orders/{id}:
+    parameters: [{ $ref: '#/components/parameters/UuidPath' }]
+    get:
+      tags: [Orders]
+      operationId: getOrder
+      summary: Get an order with its items and history
+      description: Customers can retrieve only their own order. An inaccessible customer order returns the same 404 as a missing order.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Full order.
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Order' } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/OrderNotFound' }
+  /api/v1/orders/{id}/status:
+    parameters: [{ $ref: '#/components/parameters/UuidPath' }]
+    patch:
+      tags: [Orders]
+      operationId: changeOrderStatus
+      summary: Change an order status
+      description: |
+        Admin only. Valid transitions are `pending` → `confirmed` or `cancelled`,
+        `confirmed` → `shipped` or `cancelled`, and `shipped` → `delivered`.
+        `delivered` and `cancelled` are final. Cancellation returns reserved stock.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OrderStatusChange' }
+      responses:
+        '200':
+          description: Full updated order.
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Order' } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/OrderNotFound' }
+        '409': { $ref: '#/components/responses/InvalidStatusTransition' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "Paste the JWT returned by `/api/v1/auth/login`. Swagger UI sends it as `Authorization: Bearer <token>`."
+  parameters:
+    UuidPath:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    Category:
+      name: category
+      in: query
+      schema: { type: string, minLength: 1, maxLength: 100 }
+  responses:
+    ValidationError:
+      description: Request data is invalid.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: VALIDATION_ERROR, message: Invalid input, details: [{ field: id, message: id must be a valid UUID }] } }
+    Unauthorized:
+      description: A bearer token is missing, malformed, invalid, or expired.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: UNAUTHORIZED, message: Missing or malformed Authorization header } }
+    Forbidden:
+      description: The authenticated role is not allowed to perform this action.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: FORBIDDEN, message: You do not have permission to perform this action } }
+    ProductNotFound:
+      description: Product does not exist.
+      content:
+        application/json: { schema: { $ref: '#/components/schemas/Error' }, example: { error: { code: PRODUCT_NOT_FOUND, message: Product not found } } }
+    OrderNotFound:
+      description: Order does not exist or is not accessible to the customer.
+      content:
+        application/json: { schema: { $ref: '#/components/schemas/Error' }, example: { error: { code: ORDER_NOT_FOUND, message: Order not found } } }
+    UserNotFound:
+      description: User no longer exists.
+      content:
+        application/json: { schema: { $ref: '#/components/schemas/Error' }, example: { error: { code: USER_NOT_FOUND, message: User not found } } }
+    RouteNotFound:
+      description: Route or static resource was not found.
+      content:
+        application/json: { schema: { $ref: '#/components/schemas/Error' }, example: { error: { code: NOT_FOUND, message: Route not found } } }
+    FileTooLarge:
+      description: The image exceeds 2 MB.
+      content:
+        application/json: { schema: { $ref: '#/components/schemas/Error' }, example: { error: { code: FILE_TOO_LARGE, message: Image is too large } } }
+    InsufficientStock:
+      description: There is not enough stock for the requested operation.
+      content:
+        application/json: { schema: { $ref: '#/components/schemas/Error' }, example: { error: { code: INSUFFICIENT_STOCK, message: Stock cannot go below zero } } }
+    InvalidStatusTransition:
+      description: The requested status transition is not allowed.
+      content:
+        application/json: { schema: { $ref: '#/components/schemas/Error' }, example: { error: { code: INVALID_STATUS_TRANSITION, message: Cannot change order status from pending to shipped } } }
+  schemas:
+    User:
+      type: object
+      required: [id, email, role, created_at]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        email: { type: string, format: email, maxLength: 255 }
+        role: { type: string, enum: [customer, admin], readOnly: true }
+        created_at: { type: string, format: date-time, readOnly: true }
+    RegisterRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email, maxLength: 255 }
+        password: { type: string, format: password, minLength: 8, writeOnly: true }
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, format: password, writeOnly: true }
+    TokenResponse:
+      type: object
+      required: [token, token_type]
+      properties:
+        token: { type: string, readOnly: true, description: Signed JWT. }
+        token_type: { type: string, const: Bearer, readOnly: true }
+    Product:
+      type: object
+      required: [id, name, description, category, price, stock, image_url, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        name: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: [string, 'null'], maxLength: 2000 }
+        category: { type: [string, 'null'], maxLength: 100, description: Stored in lower case. }
+        price: { type: string, pattern: '^\\d{1,8}(\\.\\d{1,2})?$', example: '19.99', description: Exact decimal as a string in responses. }
+        stock: { type: integer, minimum: 0 }
+        image_url:
+          type: [string, 'null']
+          description: Public path to the uploaded image, if supplied.
+        created_at: { type: string, format: date-time, readOnly: true }
+        updated_at: { type: string, format: date-time, readOnly: true }
+    ProductCreate:
+      type: object
+      required: [name, price]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: [string, 'null'], maxLength: 2000 }
+        category: { type: [string, 'null'], maxLength: 100 }
+        price:
+          oneOf:
+            - { type: number, minimum: 0, maximum: 99999999.99, multipleOf: 0.01 }
+            - { type: string, pattern: '^\\d{1,8}(\\.\\d{1,2})?$' }
+        stock:
+          oneOf:
+            - { type: integer, minimum: 0, maximum: 1000000 }
+            - { type: string, pattern: '^\\d+$' }
+          default: 0
+    ProductUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: [string, 'null'], maxLength: 2000 }
+        category: { type: [string, 'null'], maxLength: 100 }
+        price:
+          oneOf:
+            - { type: number, minimum: 0, maximum: 99999999.99, multipleOf: 0.01 }
+            - { type: string, pattern: '^\\d{1,8}(\\.\\d{1,2})?$' }
+    StockChange:
+      type: object
+      required: [change]
+      properties:
+        change:
+          oneOf:
+            - { type: integer, minimum: -1000000, maximum: 1000000, not: { const: 0 } }
+            - { type: string, pattern: '^-?\\d+$' }
+    Pagination:
+      type: object
+      required: [page, limit, total, total_pages]
+      properties:
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+        total: { type: integer, minimum: 0 }
+        total_pages: { type: integer, minimum: 0 }
+    ProductPage:
+      type: object
+      required: [data, pagination]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/Product' } }
+        pagination: { $ref: '#/components/schemas/Pagination' }
+    OrderStatus:
+      type: string
+      enum: [pending, confirmed, shipped, delivered, cancelled]
+    OrderItemInput:
+      type: object
+      additionalProperties: true
+      required: [product_id, quantity]
+      properties:
+        product_id: { type: string, format: uuid }
+        quantity: { type: integer, minimum: 1, maximum: 100 }
+    OrderCreate:
+      type: object
+      additionalProperties: true
+      required: [items]
+      properties:
+        items: { type: array, minItems: 1, maxItems: 50, items: { $ref: '#/components/schemas/OrderItemInput' } }
+    OrderItem:
+      type: object
+      required: [product_id, product_name, unit_price, quantity, line_total]
+      properties:
+        product_id: { type: string, format: uuid, readOnly: true }
+        product_name: { type: string, readOnly: true }
+        unit_price: { type: string, example: '19.99', readOnly: true }
+        quantity: { type: integer, readOnly: true }
+        line_total: { type: string, example: '39.98', readOnly: true }
+    OrderHistoryEntry:
+      type: object
+      required: [from_status, to_status, changed_at]
+      properties:
+        from_status: { type: [string, 'null'], enum: [pending, confirmed, shipped, delivered, cancelled, null], readOnly: true }
+        to_status: { $ref: '#/components/schemas/OrderStatus' }
+        changed_at: { type: string, format: date-time, readOnly: true }
+    OrderHeader:
+      type: object
+      required: [id, user_id, status, total, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        user_id: { type: string, format: uuid, readOnly: true }
+        status: { $ref: '#/components/schemas/OrderStatus' }
+        total: { type: string, example: '39.98', readOnly: true }
+        created_at: { type: string, format: date-time, readOnly: true }
+        updated_at: { type: string, format: date-time, readOnly: true }
+    Order:
+      allOf:
+        - $ref: '#/components/schemas/OrderHeader'
+        - type: object
+          required: [items, history]
+          properties:
+            items: { type: array, items: { $ref: '#/components/schemas/OrderItem' }, readOnly: true }
+            history: { type: array, items: { $ref: '#/components/schemas/OrderHistoryEntry' }, readOnly: true }
+    OrderPage:
+      type: object
+      required: [data, pagination]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/OrderHeader' } }
+        pagination: { $ref: '#/components/schemas/Pagination' }
+    OrderStatusChange:
+      type: object
+      additionalProperties: true
+      required: [status]
+      properties:
+        status: { $ref: '#/components/schemas/OrderStatus' }
+    ErrorDetail:
+      type: object
+      required: [field, message]
+      properties:
+        field: { type: string }
+        message: { type: string }
+      additionalProperties: true
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: { type: array, items: { $ref: '#/components/schemas/ErrorDetail' } }
