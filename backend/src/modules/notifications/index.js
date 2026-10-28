@@ -1,7 +1,5 @@
-// notifications module: empty for now. It will get its own routes, service and repository files,
-// following the same structure as the users module.
-const express = require('express');
+// Public face of the notifications module. Other modules only import this file.
+const router = require('./notifications.routes');
+const { createForOrderEvent } = require('./notifications.service');
 
-const router = express.Router();
-
-module.exports = { router };
+module.exports = { router, createForOrderEvent };
