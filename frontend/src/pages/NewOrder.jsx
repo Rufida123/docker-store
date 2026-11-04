@@ -46,7 +46,7 @@ export default function NewOrder() {
   useEffect(() => {
     if (applied.current || !preselect || !catalog) return;
     applied.current = true;
-    const p = catalog.find((x) => x.id === preselect && x.stock > 0);
+    const p = catalog.find((x) => x.id === preselect && (x.stock > 0 || x.stock_status === 'unavailable'));
     if (p) setRows([newRow(p)]);
   }, [catalog, preselect]);
 
@@ -61,9 +61,11 @@ export default function NewOrder() {
   const rowErrors = (r) => {
     const p = live(r);
     const qty = Number(r.quantity);
+    // With the inventory offline, stock is unknown (null): the server decides.
+    const knownStock = p && p.stock_status !== 'unavailable' && p.stock != null;
     return {
       product: !p ? 'Choose a product' : '',
-      quantity: !Number.isInteger(qty) || qty < 1 ? 'Min. 1' : p && qty > p.stock ? `Only ${p.stock} in stock` : '',
+      quantity: !Number.isInteger(qty) || qty < 1 ? 'Min. 1' : knownStock && qty > p.stock ? `Only ${p.stock} in stock` : '',
     };
   };
   const valid = rows.every((r) => {
@@ -75,8 +77,7 @@ export default function NewOrder() {
   // An estimate: the server always recomputes the real total from its own prices.
   const estimate = rows.reduce((s, r) => s + (live(r) ? lineTotal(live(r).price, Number(r.quantity) || 0) : 0), 0);
 
-  const submit = async (e) => {
-    e.preventDefault();
+  const placeOrder = async () => {
     setTouched(true);
     if (!valid || loading) return;
     setError(null);
@@ -97,6 +98,11 @@ export default function NewOrder() {
     }
   };
 
+  const submit = (e) => {
+    e.preventDefault();
+    placeOrder();
+  };
+
   const empty = !catalogLoading && !catalogError && products.length === 0;
 
   return (
@@ -106,7 +112,10 @@ export default function NewOrder() {
         <Box sx={{ display: 'grid', gap: 3, gridTemplateColumns: { xs: '1fr', md: '1fr 320px' }, alignItems: 'start' }}>
           <Card sx={{ p: { xs: 2, sm: 3 } }}>
             <Stack spacing={2.5}>
-              <ErrorAlert error={error} />
+              <ErrorAlert
+                error={error}
+                onRetry={['INVENTORY_UNAVAILABLE', 'INVENTORY_TIMEOUT'].includes(error?.code) ? placeOrder : undefined}
+              />
               <ErrorAlert error={catalogError} onRetry={refetch} />
               {catalogLoading && (
                 <>
@@ -129,10 +138,17 @@ export default function NewOrder() {
                           fullWidth
                           options={products}
                           value={p}
-                          onChange={(_, product) => update(r.key, { product, quantity: product ? Math.min(Number(r.quantity) || 1, product.stock) : r.quantity })}
+                          onChange={(_, product) =>
+                            update(r.key, {
+                              product,
+                              quantity: product && product.stock != null ? Math.min(Number(r.quantity) || 1, product.stock) : r.quantity,
+                            })
+                          }
                           getOptionLabel={(o) => o.name}
                           isOptionEqualToValue={(o, v) => o.id === v.id}
-                          getOptionDisabled={(o) => o.stock < 1 || (chosen.has(o.id) && o.id !== r.product?.id)}
+                          getOptionDisabled={(o) =>
+                            (o.stock_status !== 'unavailable' && o.stock < 1) || (chosen.has(o.id) && o.id !== r.product?.id)
+                          }
                           noOptionsText="No matching product"
                           renderOption={(props, o) => (
                             <li {...props} key={o.id}>
@@ -145,8 +161,8 @@ export default function NewOrder() {
                                     {formatMoney(o.price)}
                                   </Typography>
                                 </Stack>
-                                <Typography variant="caption" color={o.stock < 1 ? 'error' : 'text.secondary'}>
-                                  {[o.category && capitalize(o.category), stockInfo(o.stock).label].filter(Boolean).join(' · ')}
+                                <Typography variant="caption" color={o.stock_status !== 'unavailable' && o.stock < 1 ? 'error' : 'text.secondary'}>
+                                  {[o.category && capitalize(o.category), stockInfo(o.stock, o.stock_status).label].filter(Boolean).join(' · ')}
                                   {chosen.has(o.id) && o.id !== r.product?.id ? ' · already in your order' : ''}
                                 </Typography>
                               </Stack>
@@ -183,8 +199,8 @@ export default function NewOrder() {
                             sx={{ width: 96, mt: 0.5 }}
                           />
                           <IconButton
-                            onClick={() => update(r.key, { quantity: p ? Math.min(p.stock, qty + 1) : qty + 1 })}
-                            disabled={Boolean(p) && qty >= p.stock}
+                            onClick={() => update(r.key, { quantity: p && p.stock != null ? Math.min(p.stock, qty + 1) : qty + 1 })}
+                            disabled={Boolean(p) && p.stock != null && qty >= p.stock}
                             aria-label="Increase quantity"
                             sx={{ mt: 0.5 }}
                           >

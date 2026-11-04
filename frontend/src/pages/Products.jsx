@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link as RouterLink, useSearchParams } from 'react-router-dom';
 import {
+  Alert,
   Box,
   Button,
   Card,
@@ -33,13 +34,13 @@ import ErrorAlert from '../components/ErrorAlert';
 import EmptyState from '../components/EmptyState';
 import ProductImage from '../components/ProductImage';
 import { ProductDialog, StockDialog } from '../components/ProductDialogs';
-import { capitalize, formatMoney, normalizeList, stockInfo } from '../utils/format';
+import { capitalize, formatMoney, normalizeList, soldOut, stockInfo } from '../utils/format';
 
 const PAGE_SIZE = 12;
 
 function ProductCard({ product, isAdmin, onEdit, onStock }) {
-  const stock = stockInfo(product.stock);
-  const soldOut = !(product.stock > 0);
+  const stock = stockInfo(product.stock, product.stock_status);
+  const unorderable = soldOut(product);
   return (
     <Card sx={{ height: '100%', display: 'flex', flexDirection: 'column', transition: 'box-shadow .15s, transform .15s', '&:hover': { boxShadow: 4, transform: 'translateY(-2px)' } }}>
       <CardActionArea component={RouterLink} to={`/products/${product.id}`} sx={{ flexGrow: 1, display: 'flex', flexDirection: 'column', alignItems: 'stretch', justifyContent: 'flex-start' }}>
@@ -85,7 +86,7 @@ function ProductCard({ product, isAdmin, onEdit, onStock }) {
             startIcon={<AddShoppingCartIcon />}
             component={RouterLink}
             to={`/orders/new?product=${product.id}`}
-            disabled={soldOut}
+            disabled={unorderable}
           >
             Order
           </Button>
@@ -223,6 +224,12 @@ export default function Products() {
       </Stack>
 
       {source.error && <ErrorAlert error={source.error} onRetry={source.refetch} sx={{ mb: 2 }} />}
+
+      {!loading && (items || []).some((p) => p.stock_status === 'unavailable') && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          The inventory service is offline, so stock levels can&apos;t be shown right now.
+        </Alert>
+      )}
 
       {loading ? (
         <Box sx={{ display: 'grid', gap: 2.5, gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', lg: 'repeat(3, 1fr)' } }}>

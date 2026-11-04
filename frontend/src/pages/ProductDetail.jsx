@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link as RouterLink, useLocation, useNavigate, useParams } from 'react-router-dom';
-import { Box, Button, Card, Chip, Divider, Skeleton, Stack, Typography } from '@mui/material';
+import { Alert, Box, Button, Card, Chip, Divider, Skeleton, Stack, Typography } from '@mui/material';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import EditIcon from '@mui/icons-material/EditOutlined';
 import InventoryIcon from '@mui/icons-material/Inventory2Outlined';
@@ -12,7 +12,7 @@ import ErrorAlert from '../components/ErrorAlert';
 import EmptyState from '../components/EmptyState';
 import ProductImage from '../components/ProductImage';
 import { ProductDialog, StockDialog } from '../components/ProductDialogs';
-import { UUID_RE, capitalize, formatDate, formatMoney, stockInfo } from '../utils/format';
+import { UUID_RE, capitalize, formatDate, formatMoney, soldOut, stockInfo } from '../utils/format';
 
 export default function ProductDetail() {
   const { id } = useParams();
@@ -25,7 +25,7 @@ export default function ProductDetail() {
 
   const goBack = () => (location.key !== 'default' ? navigate(-1) : navigate('/products'));
   const notFound = !validId || error?.code === 'PRODUCT_NOT_FOUND';
-  const stock = stockInfo(product?.stock);
+  const stock = stockInfo(product?.stock, product?.stock_status);
 
   return (
     <>
@@ -76,6 +76,21 @@ export default function ProductDetail() {
               </Typography>
               <Chip label={stock.label} color={stock.color} variant="outlined" />
             </Stack>
+            {stock.unavailable ? (
+              <Alert severity="warning">
+                Stock information is unavailable right now. You can still place an order; availability is
+                checked the moment it is placed.
+              </Alert>
+            ) : (
+              <Box>
+                <Typography variant="body1" fontWeight={600}>
+                  Available: {product.stock}
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  Live from the inventory service.
+                </Typography>
+              </Box>
+            )}
             <Typography color="text.secondary" sx={{ whiteSpace: 'pre-line' }}>
               {product.description || 'No description available.'}
             </Typography>
@@ -97,10 +112,10 @@ export default function ProductDetail() {
                 startIcon={<AddShoppingCartIcon />}
                 component={RouterLink}
                 to={`/orders/new?product=${product.id}`}
-                disabled={!(product.stock > 0)}
+                disabled={soldOut(product)}
                 sx={{ alignSelf: 'flex-start' }}
               >
-                {product.stock > 0 ? 'Order this product' : 'Out of stock'}
+                {soldOut(product) ? 'Out of stock' : 'Order this product'}
               </Button>
             )}
 
