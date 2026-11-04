@@ -26,7 +26,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    environment:
+    environment: &backend-environment
       APP_NAME: "Docker Store"
       APP_ENV: production
       APP_DEBUG: "false"
@@ -49,11 +49,61 @@ services:
       UPLOAD_DIR: /app/uploads
       # Firebase push notifications (optional): put the service account JSON in ./secrets
       FIREBASE_SERVICE_ACCOUNT_FILE: /run/secrets/firebase-service-account.json
+      # Inventory service (gRPC). No hard dependency: the catalog still serves
+      # with the inventory down, so the backend starts regardless.
+      INVENTORY_GRPC_ADDR: inventory:50051
+      INVENTORY_TIMEOUT_MS: 2000
+      INVENTORY_CONNECT_TIMEOUT_MS: 500
     ports:
       - "${PORT}:3000"
     volumes:
       - uploads_laravel:/app/uploads # uploaded product images survive rebuilds
       - ./secrets:/run/secrets:ro    # never committed (see .gitignore)
+
+  # Same image as backend; delivers parked inventory releases every minute.
+  scheduler:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: laravel_scheduler
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment: *backend-environment
+    entrypoint: ["php", "artisan", "schedule:work"]
+    volumes:
+      - ./secrets:/run/secrets:ro
+
+  inventory_db:
+    image: postgres:16-alpine
+    container_name: laravel_inventory_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${INVENTORY_DB_USER}
+      POSTGRES_PASSWORD: ${INVENTORY_DB_PASSWORD}
+      POSTGRES_DB: ${INVENTORY_DB_NAME}
+    volumes:
+      - inventory_pgdata_laravel:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${INVENTORY_DB_USER} -d ${INVENTORY_DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  inventory:
+    build:
+      context: .
+      dockerfile: inventory-service/Dockerfile
+    container_name: laravel_inventory
+    restart: unless-stopped
+    depends_on:
+      inventory_db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${INVENTORY_DB_USER}:${INVENTORY_DB_PASSWORD}@inventory_db:5432/${INVENTORY_DB_NAME}
+    ports:
+      - "50051:50051" # published for grpcurl demos; the backend uses the service name
 
   frontend:
     build:
@@ -76,3 +126,4 @@ services:
 volumes:
   pgdata_laravel:
   uploads_laravel:
+  inventory_pgdata_laravel:
