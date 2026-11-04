@@ -5,10 +5,6 @@ namespace App\Modules\Products;
 /**
  * Public face of the products module.
  * Other code may only use this class, never the classes next to it.
- *
- * reserveStock / releaseStock run inside the caller's transaction, so stock
- * changes commit or roll back together with the caller's own changes (used by
- * orders).
  */
 class ProductsModule
 {
@@ -17,18 +13,14 @@ class ProductsModule
     }
 
     /**
-     * items: [{ product_id, quantity }]  ->  [{ product_id, name, price, quantity }]
+     * Name and price for an order's lines, copied at order time so later
+     * product edits never change past orders. Throws the documented 404 when
+     * any product id is unknown.
+     *
+     * items: [{ product_id, quantity }] -> [{ product_id, name, price, quantity }]
      */
-    public function reserveStock(array $items): array
+    public function getOrderLines(array $items): array
     {
-        return $this->service->reserveStock($items);
-    }
-
-    /**
-     * items: [{ product_id, quantity }]
-     */
-    public function releaseStock(array $items): void
-    {
-        $this->service->releaseStock($items);
+        return $this->service->getOrderLines($items);
     }
 }

@@ -11,12 +11,13 @@ class DatabaseSeeder extends Seeder
     public function run(UsersModule $users): void
     {
         // Sample products with fixed ids so the API collection can order them.
+        // Their stock lives in the inventory service, which seeds the same ids.
         DB::statement(<<<'SQL'
-            INSERT INTO products (id, name, category, price, stock) VALUES
-              ('00000000-0000-4000-8000-000000000001', 'Wireless Mouse',        'electronics', 19.99, 500),
-              ('00000000-0000-4000-8000-000000000002', 'Mechanical Keyboard',   'electronics', 89.50, 300),
-              ('00000000-0000-4000-8000-000000000003', 'Cotton T-Shirt',        'clothing',     12.00, 1000),
-              ('00000000-0000-4000-8000-000000000004', 'Limited Edition Watch', 'accessories', 249.00, 3)
+            INSERT INTO products (id, name, category, price) VALUES
+              ('00000000-0000-4000-8000-000000000001', 'Wireless Mouse',        'electronics', 19.99),
+              ('00000000-0000-4000-8000-000000000002', 'Mechanical Keyboard',   'electronics', 89.50),
+              ('00000000-0000-4000-8000-000000000003', 'Cotton T-Shirt',        'clothing',     12.00),
+              ('00000000-0000-4000-8000-000000000004', 'Limited Edition Watch', 'accessories', 249.00)
             ON CONFLICT (id) DO NOTHING
         SQL);
 
