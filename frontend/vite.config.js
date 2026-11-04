@@ -14,6 +14,11 @@ export default defineConfig({
         target,
         changeOrigin: true,
       },
+      // Uploaded product images are served by the backend too.
+      '/uploads': {
+        target,
+        changeOrigin: true,
+      },
     },
   },
 });

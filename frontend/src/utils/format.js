@@ -83,12 +83,21 @@ export function initials(user) {
 
 export const userLabel = (u) => u?.name || u?.email || shortId(u?.id);
 
-export function stockInfo(stock) {
+export function stockInfo(stock, stockStatus) {
+  // stock comes live from the inventory service; when it can't be reached the
+  // API sends stock: null with stock_status "unavailable".
+  if (stockStatus === 'unavailable' || stock === null || stock === undefined) {
+    return { label: 'Stock unavailable', color: 'default', unavailable: true };
+  }
   const n = Number(stock);
   if (!(n > 0)) return { label: 'Out of stock', color: 'error' };
   if (n <= 5) return { label: `Only ${n} left`, color: 'warning' };
   return { label: `${n} in stock`, color: 'success' };
 }
+
+// Whether ordering should be blocked for a product. When stock is unknown the
+// order can still be tried: the server gives the definitive answer.
+export const soldOut = (p) => p?.stock_status !== 'unavailable' && !(p?.stock > 0);
 
 // Timestamp of a status-history entry (tolerates different field names).
 export const historyTime = (h) => h?.created_at || h?.changed_at || h?.createdAt || h?.at;
