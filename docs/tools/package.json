@@ -1,0 +1,12 @@
+{
+  "name": "docker-store-docs-tools",
+  "private": true,
+  "description": "Helper scripts for the API docs: runs the Postman collection and saves real responses as examples plus an HTML report.",
+  "scripts": {
+    "save-examples": "node save-examples.js"
+  },
+  "devDependencies": {
+    "newman": "^6.2.1",
+    "newman-reporter-htmlextra": "^1.23.1"
+  }
+}
