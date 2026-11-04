@@ -1,0 +1,106 @@
+syntax = "proto3";
+
+package inventory.v1;
+
+// The inventory service owns product stock. The main app reaches stock only
+// through these calls; nothing else touches the inventory database.
+//
+// A refusal (shortage, already released, below zero) is a normal response,
+// never a gRPC error. gRPC status codes carry only real failures:
+// INVALID_ARGUMENT for bad input, plus the transport's own UNAVAILABLE and
+// DEADLINE_EXCEEDED.
+service Inventory {
+  // Available quantities for up to 100 products in one call. Unknown ids
+  // report 0. Duplicate ids are allowed and answered once each.
+  rpc GetStock(GetStockRequest) returns (GetStockResponse);
+
+  // All-or-nothing reservation for one order, in one database transaction.
+  // reservation_id is chosen by the caller (the order's UUID) and is the
+  // idempotency key: repeating an id that is already reserved returns
+  // RESERVED again without taking stock twice; an id that was already
+  // released is answered with ALREADY_RELEASED and takes nothing.
+  rpc ReserveStock(ReserveStockRequest) returns (ReserveStockResponse);
+
+  // Returns a reservation's stock. Idempotent and race-safe: releasing an id
+  // that was never reserved records a "released" tombstone, so a reserve that
+  // arrives later with that id can never take stock.
+  rpc ReleaseStock(ReleaseStockRequest) returns (ReleaseStockResponse);
+}
+
+// Admin restocking lives in its own service so the order-flow contract stays
+// exactly the three operations above.
+service InventoryAdmin {
+  // Relative, non-zero change. A positive change on an unknown product
+  // creates its stock row. A change that would take the quantity below zero
+  // is refused and the current quantity is returned.
+  rpc AdjustStock(AdjustStockRequest) returns (AdjustStockResponse);
+}
+
+message GetStockRequest {
+  repeated string product_ids = 1; // 0..100 UUIDs (empty is a cheap health probe)
+}
+
+message StockLevel {
+  string product_id = 1;
+  int32 available = 2;
+}
+
+message GetStockResponse {
+  repeated StockLevel levels = 1; // request order, duplicates removed
+}
+
+message ReservationItem {
+  string product_id = 1;
+  int32 quantity = 2; // > 0; duplicate product_ids are summed
+}
+
+message ReserveStockRequest {
+  string reservation_id = 1; // caller-chosen UUID, the idempotency key
+  repeated ReservationItem items = 2; // 1..100 entries
+}
+
+message Shortage {
+  string product_id = 1;
+  int32 requested = 2;
+  int32 available = 3;
+}
+
+message ReserveStockResponse {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    RESERVED = 1;         // everything taken
+    REFUSED = 2;          // nothing taken; shortage says why
+    ALREADY_RELEASED = 3; // the id carries a release tombstone; nothing taken
+  }
+  Status status = 1;
+  Shortage shortage = 2; // set only when REFUSED
+}
+
+message ReleaseStockRequest {
+  string reservation_id = 1;
+}
+
+message ReleaseStockResponse {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    RELEASED = 1;         // stock given back now
+    ALREADY_RELEASED = 2; // released before; nothing changed
+    NOT_FOUND = 3;        // never reserved; a tombstone now blocks that id
+  }
+  Status status = 1;
+}
+
+message AdjustStockRequest {
+  string product_id = 1;
+  int32 change = 2; // relative, non-zero
+}
+
+message AdjustStockResponse {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    APPLIED = 1;
+    REFUSED = 2; // would go below zero; nothing changed
+  }
+  Status status = 1;
+  int32 available = 2; // after APPLIED, or the current value after REFUSED
+}
