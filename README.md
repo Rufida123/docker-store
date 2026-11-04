@@ -1,6 +1,14 @@
-# Docker Store (modular monolith): Laravel + PostgreSQL + Docker
+# Docker Store: Laravel + PostgreSQL + a gRPC inventory service + Docker
 
-Three containers: `db` (PostgreSQL), `backend` (Laravel API on FrankenPHP) and `frontend` (nginx).
+Containers: `db` (PostgreSQL), `backend` (Laravel API on FrankenPHP), `scheduler`
+(same image, delivers parked inventory releases), `inventory` (Node gRPC service
+that owns product stock), `inventory_db` (its own PostgreSQL) and `frontend` (nginx).
+
+Stock lives in the **inventory service**, an independent gRPC server with its own
+database. The contract is [`proto/inventory/v1/inventory.proto`](proto/inventory/v1/inventory.proto)
+(three operations: get the quantity, reserve it, release it — plus an admin
+restock call). The full design, the failure handling and the demo walkthrough are
+in [`docs/inventory-grpc.md`](docs/inventory-grpc.md).
 
 ## Structure
 
@@ -63,15 +71,36 @@ come from `ADMIN_EMAIL` and `ADMIN_PASSWORD` at startup.
 
 ## Running without Docker (Windows)
 
-Requirements: PHP 8.4 with pdo_pgsql/pgsql/intl/mbstring enabled, composer, PostgreSQL 16.
+Requirements: PHP 8.4 with pdo_pgsql/pgsql/intl/mbstring/curl (with HTTP/2),
+composer, Node.js 20+, PostgreSQL 16. Three processes run side by side:
+
+PostgreSQL, then the inventory service:
+
+    cd inventory-service
+    npm install
+    copy .env.example .env   # DATABASE_URL of its own database (e.g. "inventory")
+    node src/server.js       # applies its migrations, listens on 0.0.0.0:50051
+
+Then the API:
 
     cd backend
     composer install
-    copy .env.example .env   # fill in DB_*, JWT_SECRET, ADMIN_*
+    copy .env.example .env   # fill in DB_*, JWT_SECRET, ADMIN_*, INVENTORY_GRPC_ADDR
     php artisan migrate --force
     php artisan db:seed --force
     php artisan app:check-env
     php artisan serve --port=3000
+
+`SIMULATE_DELAY_MS` in the inventory service's `.env` is a demo-only setting: it
+delays every call by that many milliseconds, to show the client deadline
+(`INVENTORY_TIMEOUT_MS`, default 2000 ms) in action. Leave it 0.
+
+### Regenerating the PHP protobuf classes
+
+The classes in `backend/generated/` are committed. After changing the contract,
+regenerate them with protoc (https://github.com/protocolbuffers/protobuf/releases):
+
+    protoc --php_out=backend/generated --proto_path=proto proto/inventory/v1/inventory.proto
 
 ## Endpoints
 
@@ -171,7 +200,39 @@ Dead device tokens reported by Firebase are deleted automatically.
 
 ## Tests
 
+Tests NEVER run against the app's databases: each suite uses its own `*_test`
+database and refuses to start otherwise (the suites migrate and truncate freely).
+
+- Backend (phpunit): uses `docker_store_test` (set in `phpunit.xml`; connection
+  details in a gitignored `backend/.env.testing`). In Docker, create it once on
+  the `db` container and run the suite inside `backend`:
+
+      docker compose exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "CREATE DATABASE docker_store_test"'
+      docker compose exec -e DB_DATABASE=docker_store_test backend php artisan test
+
+  It includes the compensation tests: a failed order save releases the
+  reservation, and a failed release is parked in `inventory_outbox` and
+  delivered by `php artisan inventory:flush-outbox`.
+- Inventory service (node:test): uses `inventory_test` (TEST_DATABASE_URL, or
+  the configured database name swapped for `inventory_test`):
+
+      docker compose exec inventory_db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "CREATE DATABASE inventory_test"'
+      cd inventory-service && npm test
+
 - API: run the Postman collection `docs/docker-store.postman_collection.json` against
-  http://localhost:3000 (set the working directory to `docs/test-files` for the image uploads,
-  and pass your `ADMIN_PASSWORD` as the `adminPassword` variable).
+  http://localhost:3000 with the inventory service running (set the working
+  directory to `docs/test-files` for the image uploads, and pass your
+  `ADMIN_PASSWORD` as the `adminPassword` variable).
 - Architecture: `php artisan test --testsuite=Architecture` enforces the module borders.
+- API examples + HTML report: with the API and the inventory service running,
+
+      cd docs/tools && npm install && npm run save-examples
+
+  runs the full collection and regenerates
+  `docs/docker-store.postman_collection.with-examples.json` (the collection with
+  a real, saved example per request — import it in Postman to browse them) and
+  `docs/reports/api-run.html` (request/response + pass/fail per call). The
+  admin password is read from `backend/.env`; tokens and passwords are replaced
+  with `<redacted>` in both outputs. The original collection is not modified.
+- Demo proofs (race on the last unit, inventory down/slow): see `docs/proofs/`
+  and the walkthrough in `docs/inventory-grpc.md`.
