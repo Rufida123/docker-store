@@ -1,7 +1,9 @@
 .env
 node_modules
+vendor
 dist
 uploads
+storage/logs
 # Firebase service account and other secrets: never commit them
 secrets/*
 !secrets/README.md

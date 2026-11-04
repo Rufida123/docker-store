@@ -1,28 +1,33 @@
-# JWT Auth (modular monolith): Node.js + Express + PostgreSQL + Docker
+# Docker Store (modular monolith): Laravel + PostgreSQL + Docker
 
-Two containers: `db` (PostgreSQL) and `backend` (Express API).
+Three containers: `db` (PostgreSQL), `backend` (Laravel API on FrankenPHP) and `frontend` (nginx).
 
 ## Structure
 
-    backend/src/
-      index.js            starts the server (creates the admin user first)
-      app.js              builds the Express app and mounts the modules under /api/v1
-      shared/             code used by every module
-        db.js               PostgreSQL connection pool
-        transaction.js      withTransaction(fn): run several queries as one transaction
-        validation.js       UUID check, pagination
-        events.js           in-process event bus between modules (publish / subscribe)
-        errors.js           AppError + asyncHandler
-        middleware/         authenticate, authorize, error handler
-      modules/
-        users/            routes -> service -> repository  (finished)
-        orders/           routes -> service -> repository  (finished)
-        products/         routes -> service -> repository  (finished, + images)
-        notifications/    routes -> service -> repository  (in-app notifications + Firebase push)
+    backend/
+      bootstrap/app.php     builds the app: routing, global middleware, the one exception renderer
+      routes/app.php        /health, /api-docs, /uploads/products/<file>
+      routes/api.php        mounts every module's routes under /api/v1
+      app/Shared/           code used by every module
+        AppError.php          one error type for the whole project
+        Validation.php        UUID check, pagination
+        Text.php, Time.php    string/number semantics, UTC timestamp format
+        Events.php            in-process event bus between modules (publish / subscribe)
+        Http/ApiResponse.php  one JSON envelope for data and errors
+        Http/Middleware/      authenticate, authorize, security headers, JSON body check
+      app/Modules/
+        Users/              routes -> controller -> service -> repository
+        Products/           routes -> controller -> service -> repository  (+ images)
+        Orders/             routes -> controller -> service -> repository
+        Notifications/      in-app notifications + Firebase push
+      database/migrations/  schema (raw SQL, one file per module)
+      database/seeders/     sample products + first admin user
 
-Rule: a module only imports another module through that module's `index.js`.
+Rule: a module only uses another module through that module's single public class
+(`UsersModule`, `ProductsModule`, ...). `php artisan test --testsuite=Architecture`
+fails the build when anything else is referenced across module borders.
 
-## Setup
+## Setup (Docker)
 
 1. Copy `.env.example` to `.env` and fill it in. JWT_SECRET must be a real random value
    (`openssl rand -hex 64`): the server refuses to start with a missing, short (< 32 characters)
@@ -34,24 +39,43 @@ Rule: a module only imports another module through that module's `index.js`.
 
 The API is at http://localhost:3000/api/v1
 
+On every start the backend waits for the database, runs the migrations
+(`php artisan migrate --force`) and the seeder (`php artisan db:seed --force`,
+which inserts the 4 fixed-id sample products and creates the admin account from
+`ADMIN_EMAIL` / `ADMIN_PASSWORD`), then serves on port 3000. Uploaded product
+images are kept in the `uploads_laravel` Docker volume.
+
+A healthy start prints, in `docker compose logs backend`:
+
+    Push notifications are on (Firebase project: <id>).
+    (or: Push notifications are off: no Firebase service account file (see README).)
+    API listening on port 3000
+
+The backend logs to stderr, so runtime errors also show up in `docker compose logs backend`.
+`APP_KEY` may stay empty in `.env`: nothing in this API encrypts, and the container
+generates a throwaway key for each run.
+
 Interactive API documentation is at http://localhost:3000/api-docs. The standalone OpenAPI 3.1
 document is [`docs/openapi.yaml`](docs/openapi.yaml). To call protected endpoints in Swagger UI,
 first use `POST /api/v1/auth/login`, copy its `token`, click **Authorize**, and enter the token
 in the Bearer authentication dialog. Public registration creates customer accounts; admin accounts
 come from `ADMIN_EMAIL` and `ADMIN_PASSWORD` at startup.
 
-**After pulling a change to `db/init.sql`** (new tables), reset the database once, otherwise the
-new tables are not created:
+## Running without Docker (Windows)
 
-    docker compose down -v
-    docker compose up --build -d
+Requirements: PHP 8.4 with pdo_pgsql/pgsql/intl/mbstring enabled, composer, PostgreSQL 16.
 
-`init.sql` also inserts 4 sample products (fixed ids) used by the Postman tests.
-Uploaded product images are kept in the `uploads` Docker volume.
+    cd backend
+    composer install
+    copy .env.example .env   # fill in DB_*, JWT_SECRET, ADMIN_*
+    php artisan migrate --force
+    php artisan db:seed --force
+    php artisan app:check-env
+    php artisan serve --port=3000
 
 ## Endpoints
 
-Every URL is versioned under `/api/v1` (except `/health`).
+Every URL is versioned under `/api/v1` (except `/health`, `/api-docs` and `/uploads`).
 
 | Method | URL                          | Access |
 |--------|------------------------------|--------|
@@ -135,68 +159,19 @@ Filters: `?is_read=false` (unread only) and `?type=order_created|order_status_ch
 `total` counts the filtered list; `unread_count` is always all unread (for the bell badge).
 In the front end: a bell with the unread count (customers), and a Notifications page with filters.
 
-`db/init.sql` runs only when PostgreSQL initializes an empty data directory. For an existing volume,
-apply the non-destructive migrations instead (works in PowerShell and bash), then rebuild:
-
-    Get-Content db/migrations/001_notifications.sql | docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
-    Get-Content db/migrations/002_notification_devices.sql | docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
-    docker compose up --build -d
-
-Do not use `docker compose down -v` merely to add this feature.
-
 ### Push notifications (Firebase Cloud Messaging)
 
 Optional. Without Firebase everything works the same; notifications are only shown in the app
-(the bell refreshes every 30 s). With Firebase, the customer also gets a browser notification when
-an order changes, even when no tab of the store is open.
+(the bell refreshes every 30 s). With Firebase, the customer also gets a browser notification:
 
-How it works:
+1. Put the service account JSON key in `secrets/firebase-service-account.json` (never commit it).
+2. Fill in the `VITE_FIREBASE_*` values in `.env` (public web app config) and rebuild the frontend.
 
-1. The customer clicks **Turn on** on the Notifications page; the browser asks for permission.
-2. The front end gets this browser's FCM token from Firebase and sends it to
-   `POST /api/v1/notifications/devices`. Signing out calls `DELETE /api/v1/notifications/devices/:token`.
-3. When an order is created or changes status, the orders module publishes an event **after its
-   transaction committed**; the notifications module sends the stored notification to all of the
-   customer's browsers through the Firebase Admin SDK, and deletes tokens Firebase rejects.
-4. The service worker (`frontend/public/firebase-messaging-sw.js`) shows it: a toast in a focused
-   tab, otherwise a system notification; clicking it opens the order.
+Dead device tokens reported by Firebase are deleted automatically.
 
-Setup (Firebase console, https://console.firebase.google.com):
+## Tests
 
-1. Create a project, then **Project settings > General > Your apps > Add app > Web**.
-   Copy the config values into `.env`: `VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`,
-   `VITE_FIREBASE_PROJECT_ID`, `VITE_FIREBASE_MESSAGING_SENDER_ID`, `VITE_FIREBASE_APP_ID`.
-2. **Project settings > Cloud Messaging > Web Push certificates > Generate key pair**:
-   copy the key into `VITE_FIREBASE_VAPID_KEY`.
-3. **Project settings > Service accounts > Generate new private key**: save the downloaded file as
-   `secrets/firebase-service-account.json`. It is a private key: the `secrets` folder is ignored
-   by git and by the Docker build, and the file is mounted read-only into the backend container.
-4. Rebuild: `docker compose up --build -d`. The backend log says
-   `Push notifications are on (Firebase project: ...)`.
-
-Browsers only allow push on `https://` or `http://localhost` (not `http://<LAN IP>`).
-For local development without Docker, put the `VITE_FIREBASE_*` values in `frontend/.env.local`
-and set `FIREBASE_SERVICE_ACCOUNT_FILE` to the key's path when starting the backend.
-
-## API documentation and tests
-
-Postman collection: `docs/docker-store.postman_collection.json`
-(import it in Postman, then run the whole collection with the Collection Runner).
-
-For the two image-upload requests, set Postman's working directory (Settings > General) to
-`docs/test-files`, or pick `docs/test-files/sample-product.png` by hand in the `image` field.
-
-It registers fresh accounts on every run and tests every endpoint:
-
-- folder "4. Access control (proof)": reading another customer's order, changing order status or
-  products as a customer, ordering as admin, and missing or forged tokens are all rejected
-- folder "8. Login attempt limit": 5 failed logins for one email lock that email (from that IP)
-  for 15 minutes, even with the right password; other accounts are not affected
-- folder "9. Notifications": list, filters, read / read-all, another customer's notification
-  (404), push device registration
-
-## Useful commands
-
-    docker compose down            # stop (data kept)
-    docker compose down -v         # stop and delete DB data (needed after editing db/init.sql)
-    docker compose exec db psql -U appuser -d appdb
+- API: run the Postman collection `docs/docker-store.postman_collection.json` against
+  http://localhost:3000 (set the working directory to `docs/test-files` for the image uploads,
+  and pass your `ADMIN_PASSWORD` as the `adminPassword` variable).
+- Architecture: `php artisan test --testsuite=Architecture` enforces the module borders.

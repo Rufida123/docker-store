@@ -1,6 +1,9 @@
 .git
 .env
+**/.env
 secrets
 **/node_modules
 **/uploads
+**/vendor
 frontend/dist
+backend/storage/logs/*
