@@ -1,0 +1,16 @@
+{
+	frankenphp {
+		# Enough PHP threads to serve bursts of parallel checkouts.
+		num_threads 32
+	}
+	auto_https off
+}
+
+:3000 {
+	root * /app/public
+
+	# The API never advertises its server software.
+	header -Server
+
+	php_server
+}

@@ -1,15 +1,14 @@
 services:
   db:
     image: postgres:16-alpine
-    container_name: jwt_db
+    container_name: laravel_db
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - pgdata_laravel:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     healthcheck:
@@ -22,25 +21,39 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    container_name: jwt_backend
+    container_name: laravel_backend
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
     environment:
-      PORT: 3000
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      APP_NAME: "Docker Store"
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_KEY: ${APP_KEY:-}
+      LOG_CHANNEL: stderr
+      LOG_LEVEL: info
+      DB_CONNECTION: pgsql
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_DATABASE: ${POSTGRES_DB}
+      DB_USERNAME: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      CACHE_STORE: database
+      SESSION_DRIVER: array
+      QUEUE_CONNECTION: sync
       JWT_SECRET: ${JWT_SECRET}
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN}
       ADMIN_EMAIL: ${ADMIN_EMAIL}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      UPLOAD_DIR: /app/uploads
       # Firebase push notifications (optional): put the service account JSON in ./secrets
       FIREBASE_SERVICE_ACCOUNT_FILE: /run/secrets/firebase-service-account.json
     ports:
       - "${PORT}:3000"
     volumes:
-      - uploads:/app/uploads      # uploaded product images survive rebuilds
-      - ./secrets:/run/secrets:ro # never committed (see .gitignore)
+      - uploads_laravel:/app/uploads # uploaded product images survive rebuilds
+      - ./secrets:/run/secrets:ro    # never committed (see .gitignore)
 
   frontend:
     build:
@@ -53,7 +66,7 @@ services:
         VITE_FIREBASE_MESSAGING_SENDER_ID: ${VITE_FIREBASE_MESSAGING_SENDER_ID:-}
         VITE_FIREBASE_APP_ID: ${VITE_FIREBASE_APP_ID:-}
         VITE_FIREBASE_VAPID_KEY: ${VITE_FIREBASE_VAPID_KEY:-}
-    container_name: jwt_frontend
+    container_name: laravel_frontend
     restart: unless-stopped
     depends_on:
       - backend
@@ -61,5 +74,5 @@ services:
       - "${FRONTEND_PORT:-8080}:80"
 
 volumes:
-  pgdata:
-  uploads:
+  pgdata_laravel:
+  uploads_laravel:
