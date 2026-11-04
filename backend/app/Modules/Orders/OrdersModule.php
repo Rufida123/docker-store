@@ -15,4 +15,18 @@ namespace App\Modules\Orders;
  */
 class OrdersModule
 {
+    public function __construct(private OrdersService $service)
+    {
+    }
+
+    /**
+     * Retries every inventory release that could not be delivered yet
+     * (cancelled orders, compensations). Used by inventory:flush-outbox.
+     *
+     * @return array{int, int} [delivered, still pending]
+     */
+    public function flushInventoryOutbox(): array
+    {
+        return $this->service->flushOutbox();
+    }
 }

@@ -177,6 +177,8 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '413': { $ref: '#/components/responses/FileTooLarge' }
+        '503': { $ref: '#/components/responses/InventoryUnavailable' }
+        '504': { $ref: '#/components/responses/InventoryTimeout' }
   /api/v1/products/{id}:
     parameters: [{ $ref: '#/components/parameters/UuidPath' }]
     get:
@@ -234,6 +236,8 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/ProductNotFound' }
         '409': { $ref: '#/components/responses/InsufficientStock' }
+        '503': { $ref: '#/components/responses/InventoryUnavailable' }
+        '504': { $ref: '#/components/responses/InventoryTimeout' }
   /uploads/products/{file}:
     get:
       tags: [Products]
@@ -278,6 +282,8 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/ProductNotFound' }
         '409': { $ref: '#/components/responses/InsufficientStock' }
+        '503': { $ref: '#/components/responses/InventoryUnavailable' }
+        '504': { $ref: '#/components/responses/InventoryTimeout' }
     get:
       tags: [Orders]
       operationId: listOrders
@@ -535,6 +541,24 @@ components:
       description: Notification does not exist or belongs to another user.
       content:
         application/json: { schema: { $ref: '#/components/schemas/Error' }, example: { error: { code: NOTIFICATION_NOT_FOUND, message: Notification not found } } }
+    InventoryUnavailable:
+      description: >
+        The inventory service could not be reached, so the stock-changing
+        operation was not performed. On order creation the message ends with
+        "Your order was not placed. Please try again in a moment.".
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: INVENTORY_UNAVAILABLE, message: The inventory service is unavailable right now. Your order was not placed. Please try again in a moment. } }
+    InventoryTimeout:
+      description: >
+        The inventory service did not answer within the deadline, so the
+        stock-changing operation was not performed. Any stock the timed-out
+        reservation might still take is released automatically afterwards.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: INVENTORY_TIMEOUT, message: The inventory service did not respond in time. Your order was not placed. Please try again. } }
   schemas:
     User:
       type: object
@@ -564,14 +588,27 @@ components:
         token_type: { type: string, const: Bearer, readOnly: true }
     Product:
       type: object
-      required: [id, name, description, category, price, stock, image_url, created_at, updated_at]
+      required: [id, name, description, category, price, stock, stock_status, image_url, created_at, updated_at]
       properties:
         id: { type: string, format: uuid, readOnly: true }
         name: { type: string, minLength: 1, maxLength: 200 }
         description: { type: [string, 'null'], maxLength: 2000 }
         category: { type: [string, 'null'], maxLength: 100, description: Stored in lower case. }
         price: { type: string, pattern: '^\\d{1,8}(\\.\\d{1,2})?$', example: '19.99', description: Exact decimal as a string in responses. }
-        stock: { type: integer, minimum: 0 }
+        stock:
+          type: [integer, 'null']
+          minimum: 0
+          description: >
+            Live quantity reported by the inventory service. null when the
+            inventory service cannot be reached (see stock_status); the
+            catalog itself still answers.
+        stock_status:
+          type: string
+          enum: [available, unavailable]
+          readOnly: true
+          description: >
+            available: stock came from the inventory service.
+            unavailable: the inventory service was down or timed out, stock is null.
         image_url:
           type: [string, 'null']
           description: Public path to the uploaded image, if supplied.

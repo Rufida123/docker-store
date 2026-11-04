@@ -16,23 +16,21 @@ class OrdersRepository
     private const ORDER_COLUMNS = 'id, user_id, status, total, created_at, updated_at';
 
     /**
-     * Creates the order with its total computed by PostgreSQL from the
-     * reserved items. (transaction)
+     * Creates the order under its pre-generated id (the same UUID used as the
+     * inventory reservation), with its total computed by PostgreSQL from the
+     * order lines. (transaction)
      */
-    public function insertOrder(string $userId, array $items): string
+    public function insertOrder(string $orderId, string $userId, array $items): void
     {
         $prices = '{'.implode(',', array_map(fn (array $i) => $i['price'], $items)).'}';
         $quantities = '{'.implode(',', array_map(fn (array $i) => $i['quantity'], $items)).'}';
 
-        $rows = DB::select(
-            'INSERT INTO orders (user_id, total)
-             SELECT ?, SUM(t.price * t.quantity)
-               FROM unnest(?::numeric[], ?::int[]) AS t(price, quantity)
-             RETURNING id',
-            [$userId, $prices, $quantities],
+        DB::insert(
+            'INSERT INTO orders (id, user_id, total)
+             SELECT ?::uuid, ?, SUM(t.price * t.quantity)
+               FROM unnest(?::numeric[], ?::int[]) AS t(price, quantity)',
+            [$orderId, $userId, $prices, $quantities],
         );
-
-        return $rows[0]->id;
     }
 
     /**
@@ -160,6 +158,40 @@ class OrdersRepository
     public function updateStatus(string $id, string $status): void
     {
         DB::update('UPDATE orders SET status = ?, updated_at = NOW() WHERE id = ?', [$status, $id]);
+    }
+
+    // ---- inventory outbox: ReleaseStock deliveries that still have to happen ----
+
+    public function outboxAdd(string $reservationId): void
+    {
+        DB::insert(
+            "INSERT INTO inventory_outbox (reservation_id, action) VALUES (?, 'release')
+             ON CONFLICT (reservation_id) DO NOTHING",
+            [$reservationId],
+        );
+    }
+
+    public function outboxDelete(string $reservationId): void
+    {
+        DB::delete('DELETE FROM inventory_outbox WHERE reservation_id = ?', [$reservationId]);
+    }
+
+    public function outboxMarkAttempt(string $reservationId): void
+    {
+        DB::update('UPDATE inventory_outbox SET last_attempt_at = NOW() WHERE reservation_id = ?', [$reservationId]);
+    }
+
+    /**
+     * @return list<string> pending reservation ids, oldest first
+     */
+    public function outboxPending(int $limit = 100): array
+    {
+        $rows = DB::select(
+            'SELECT reservation_id FROM inventory_outbox ORDER BY created_at LIMIT ?',
+            [$limit],
+        );
+
+        return array_map(fn (object $row) => $row->reservation_id, $rows);
     }
 
     private static function orderRow(object $row): array

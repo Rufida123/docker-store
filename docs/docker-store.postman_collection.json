@@ -2834,6 +2834,411 @@
           ]
         }
       ]
+    },
+    {
+      "name": "10. Inventory (gRPC)",
+      "description": "Stock lives in the separate inventory service, reached over gRPC. These tests prove the app reads, reserves, releases and restocks through it.",
+      "item": [
+        {
+          "name": "Admin creates a product with stock 7",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{tokenAdmin}}"
+              }
+            ],
+            "url": "{{host}}/api/v1/products",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Inventory Folder Product\",\n  \"price\": \"5.00\",\n  \"stock\": 7\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const p = pm.response.json();",
+                  "pm.test('201 with inventory-backed stock', () => {",
+                  "  pm.response.to.have.status(201);",
+                  "  pm.expect(p.stock).to.eql(7);",
+                  "  pm.expect(p.stock_status).to.eql('available');",
+                  "});",
+                  "pm.collectionVariables.set('invProductId', p.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Product details report the inventory quantity",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{host}}/api/v1/products/{{invProductId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('stock equals what the inventory reports', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().stock).to.eql(7);",
+                  "  pm.expect(pm.response.json().stock_status).to.eql('available');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "An order reserves its quantities",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{tokenA}}"
+              }
+            ],
+            "url": "{{host}}/api/v1/orders",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [{ \"product_id\": \"{{invProductId}}\", \"quantity\": 2 }]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('invOrderId', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Stock dropped by the ordered quantity",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{host}}/api/v1/products/{{invProductId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('7 - 2 = 5', () => { pm.response.to.have.status(200); pm.expect(pm.response.json().stock).to.eql(5); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cancelling the order releases the reservation",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{tokenAdmin}}"
+              }
+            ],
+            "url": "{{host}}/api/v1/orders/{{invOrderId}}/status",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"cancelled\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 cancelled', () => { pm.response.to.have.status(200); pm.expect(pm.response.json().status).to.eql('cancelled'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Stock is back after the cancel",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{host}}/api/v1/products/{{invProductId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('back to 7', () => { pm.response.to.have.status(200); pm.expect(pm.response.json().stock).to.eql(7); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Admin creates a product with the last unit",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{tokenAdmin}}"
+              }
+            ],
+            "url": "{{host}}/api/v1/products",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Inventory Last Unit\",\n  \"price\": \"3.00\",\n  \"stock\": 1\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('invLastUnitId', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Customer A takes the last unit",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{tokenA}}"
+              }
+            ],
+            "url": "{{host}}/api/v1/orders",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [{ \"product_id\": \"{{invLastUnitId}}\", \"quantity\": 1 }]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201', () => pm.response.to.have.status(201));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Customer B is refused with the shortage",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{tokenB}}"
+              }
+            ],
+            "url": "{{host}}/api/v1/orders",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [{ \"product_id\": \"{{invLastUnitId}}\", \"quantity\": 1 }]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 INSUFFICIENT_STOCK with details', () => {",
+                  "  pm.response.to.have.status(409);",
+                  "  const e = pm.response.json().error;",
+                  "  pm.expect(e.code).to.eql('INSUFFICIENT_STOCK');",
+                  "  pm.expect(e.details[0].product_id).to.eql(pm.collectionVariables.get('invLastUnitId'));",
+                  "  pm.expect(e.details[0].requested).to.eql(1);",
+                  "  pm.expect(e.details[0].available).to.eql(0);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "The shelf is empty",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{host}}/api/v1/products/{{invLastUnitId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('stock 0', () => { pm.response.to.have.status(200); pm.expect(pm.response.json().stock).to.eql(0); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Admin restocks through the inventory service",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{tokenAdmin}}"
+              }
+            ],
+            "url": "{{host}}/api/v1/products/{{invLastUnitId}}/stock",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"change\": 3\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('0 + 3 = 3 via AdjustStock', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().stock).to.eql(3);",
+                  "  pm.expect(pm.response.json().stock_status).to.eql('available');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "A restock below zero is refused by the inventory",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{tokenAdmin}}"
+              }
+            ],
+            "url": "{{host}}/api/v1/products/{{invLastUnitId}}/stock",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"change\": -100\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 with the current quantity', () => {",
+                  "  pm.response.to.have.status(409);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('INSUFFICIENT_STOCK');",
+                  "  pm.expect(pm.response.json().error.details[0].available).to.eql(3);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     }
   ]
 }

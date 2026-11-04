@@ -2,13 +2,20 @@
 
 namespace App\Modules\Products;
 
+use App\Modules\Inventory\InventoryModule;
 use App\Shared\AppError;
+use App\Shared\InventoryError;
+use App\Shared\InventoryTimeout;
+use App\Shared\InventoryUnavailable;
 use App\Shared\Text;
 use App\Shared\Validation;
+use Illuminate\Support\Facades\DB;
 use Throwable;
 
 /**
  * Business rules of the products module (validation, images, stock).
+ * Stock itself lives in the inventory service; this module decorates product
+ * rows with it and forwards stock changes, through InventoryModule only.
  */
 class ProductsService
 {
@@ -18,8 +25,10 @@ class ProductsService
 
     private const INT_RE = '/^-?\d+$/';
 
-    public function __construct(private ProductsRepository $repo)
-    {
+    public function __construct(
+        private ProductsRepository $repo,
+        private InventoryModule $inventory,
+    ) {
     }
 
     // ---- input helpers ----
@@ -146,10 +155,62 @@ class ProductsService
         return ['data' => $data, 'details' => $details];
     }
 
+    /**
+     * Products carry their stock after the price, plus where it came from:
+     * "available" when the inventory answered, "unavailable" (stock null)
+     * when it could not be reached. The catalog itself never fails because of
+     * the inventory service.
+     */
+    private static function withStock(array $product, ?int $stock, string $stockStatus): array
+    {
+        $decorated = [];
+        foreach ($product as $key => $value) {
+            $decorated[$key] = $value;
+            if ($key === 'price') {
+                $decorated['stock'] = $stock;
+                $decorated['stock_status'] = $stockStatus;
+            }
+        }
+
+        return $decorated;
+    }
+
+    /**
+     * One batched GetStock for a whole response.
+     *
+     * @return array{levels: array<string, int>, status: 'available'|'unavailable'}
+     */
+    private function stockLevels(array $productIds): array
+    {
+        if ($productIds === []) {
+            return ['levels' => [], 'status' => 'available'];
+        }
+
+        try {
+            return ['levels' => $this->inventory->getStock($productIds), 'status' => 'available'];
+        } catch (InventoryUnavailable|InventoryTimeout|InventoryError) {
+            return ['levels' => [], 'status' => 'unavailable'];
+        }
+    }
+
+    private static function inventoryFailure(Throwable $e): Throwable
+    {
+        if ($e instanceof InventoryUnavailable) {
+            return new AppError(503, 'INVENTORY_UNAVAILABLE', 'The inventory service is unavailable right now. Please try again in a moment.');
+        }
+        if ($e instanceof InventoryTimeout) {
+            return new AppError(504, 'INVENTORY_TIMEOUT', 'The inventory service did not respond in time. Please try again.');
+        }
+
+        return $e;
+    }
+
     // ---- use cases ----
 
     /**
      * POST /products (admin). $imageBytes = the optional uploaded image.
+     * The product row and its initial stock go together: when the inventory
+     * call fails, the database transaction rolls back and the image is removed.
      */
     public function createProduct(array $body, ?string $imageBytes): array
     {
@@ -169,19 +230,27 @@ class ProductsService
         // The image is checked and saved only after all other fields are valid.
         $imageUrl = $imageBytes !== null ? ProductsImages::save($imageBytes) : null;
         try {
-            return $this->repo->create([
-                'name' => $data['name'],
-                'description' => $data['description'] ?? null,
-                'category' => $data['category'] ?? null,
-                'price' => $data['price'],
-                'stock' => $stock,
-                'image_url' => $imageUrl,
-            ]);
+            return DB::transaction(function () use ($data, $stock, $imageUrl): array {
+                $product = $this->repo->create([
+                    'name' => $data['name'],
+                    'description' => $data['description'] ?? null,
+                    'category' => $data['category'] ?? null,
+                    'price' => $data['price'],
+                    'image_url' => $imageUrl,
+                ]);
+
+                $available = 0;
+                if ($stock > 0) {
+                    $available = $this->inventory->adjust($product['id'], $stock)['available'];
+                }
+
+                return self::withStock($product, $available, 'available');
+            });
         } catch (Throwable $e) {
             if ($imageUrl !== null) {
                 ProductsImages::remove($imageUrl); // no orphan files
             }
-            throw $e;
+            throw self::inventoryFailure($e);
         }
     }
 
@@ -203,6 +272,16 @@ class ProductsService
 
         ['rows' => $rows, 'total' => $total] = $this->repo->list($category, $pagination['limit'], $pagination['offset']);
 
+        $stock = $this->stockLevels(array_column($rows, 'id'));
+        $rows = array_map(
+            fn (array $product) => self::withStock(
+                $product,
+                $stock['status'] === 'available' ? ($stock['levels'][$product['id']] ?? 0) : null,
+                $stock['status'],
+            ),
+            $rows,
+        );
+
         return Validation::paginated($rows, $pagination, $total);
     }
 
@@ -218,7 +297,13 @@ class ProductsService
             throw new AppError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
         }
 
-        return $product;
+        $stock = $this->stockLevels([$product['id']]);
+
+        return self::withStock(
+            $product,
+            $stock['status'] === 'available' ? ($stock['levels'][$product['id']] ?? 0) : null,
+            $stock['status'],
+        );
     }
 
     /**
@@ -245,13 +330,19 @@ class ProductsService
             throw new AppError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
         }
 
-        return $product;
+        $stock = $this->stockLevels([$product['id']]);
+
+        return self::withStock(
+            $product,
+            $stock['status'] === 'available' ? ($stock['levels'][$product['id']] ?? 0) : null,
+            $stock['status'],
+        );
     }
 
     /**
-     * PATCH /products/:id/stock (admin). Body: { change: 25 } to add, { change: -3 }
-     * to remove. Relative and atomic, so it is safe while customers are placing
-     * orders at the same time.
+     * PATCH /products/:id/stock (admin). Body: { change: 25 } to add,
+     * { change: -3 } to remove. The change is relative and applied by the
+     * inventory service, so it is safe while customers are ordering.
      */
     public function changeStock(mixed $id, array $body): array
     {
@@ -264,67 +355,49 @@ class ProductsService
             ]);
         }
 
-        $product = $this->repo->changeStock(mb_strtolower($id), $change);
-        if ($product !== null) {
-            return $product;
-        }
-
-        $current = $this->repo->findStock(mb_strtolower($id));
-        if ($current === null) {
+        $product = $this->repo->findById(mb_strtolower($id));
+        if ($product === null) {
             throw new AppError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
         }
-        throw new AppError(409, 'INSUFFICIENT_STOCK', 'Stock cannot go below zero', [
-            ['field' => 'change', 'available' => $current['stock'], 'message' => "Only {$current['stock']} in stock"],
-        ]);
-    }
 
-    // ---- used by other modules (through ProductsModule) ----
+        try {
+            $result = $this->inventory->adjust($product['id'], $change);
+        } catch (Throwable $e) {
+            throw self::inventoryFailure($e);
+        }
 
-    /**
-     * Every caller locks product rows in the same order (sorted by id).
-     * Without this, order A (mouse, keyboard) and order B (keyboard, mouse)
-     * could each hold one lock while waiting for the other: a deadlock.
-     */
-    private static function sortById(array $items): array
-    {
-        usort($items, fn (array $a, array $b) => strcmp($a['product_id'], $b['product_id']));
+        if ($result['status'] === 'refused') {
+            throw new AppError(409, 'INSUFFICIENT_STOCK', 'Stock cannot go below zero', [
+                ['field' => 'change', 'available' => $result['available'], 'message' => "Only {$result['available']} in stock"],
+            ]);
+        }
 
-        return $items;
+        return self::withStock($product, $result['available'], 'available');
     }
 
     /**
-     * Reserves stock for an order. Runs inside the caller's transaction, so if
-     * anything later fails (or one product is short), all stock taken here is
-     * given back by ROLLBACK.
+     * Name and price for an order's lines, in sorted product_id order (used
+     * by the orders module through ProductsModule). Unknown products get the
+     * order flow's 404.
      *
-     * items: [{ product_id, quantity }]  ->  [{ product_id, name, price, quantity }]
+     * items: [{ product_id, quantity }] -> [{ product_id, name, price, quantity }]
      */
-    public function reserveStock(array $items): array
+    public function getOrderLines(array $items): array
     {
-        $reserved = [];
+        $sorted = $items;
+        usort($sorted, fn (array $a, array $b) => strcmp($a['product_id'], $b['product_id']));
 
-        foreach (self::sortById($items) as $item) {
-            $product = $this->repo->decrementStock($item['product_id'], $item['quantity']);
+        $byId = $this->repo->findForOrder(array_column($sorted, 'product_id'));
 
+        $lines = [];
+        foreach ($sorted as $item) {
+            $product = $byId[$item['product_id']] ?? null;
             if ($product === null) {
-                $current = $this->repo->findStock($item['product_id']);
-                if ($current === null) {
-                    throw new AppError(404, 'PRODUCT_NOT_FOUND', 'Product not found', [
-                        ['field' => 'items', 'product_id' => $item['product_id'], 'message' => 'No product with this id'],
-                    ]);
-                }
-                throw new AppError(409, 'INSUFFICIENT_STOCK', 'Not enough stock for this order', [
-                    [
-                        'field' => 'items',
-                        'product_id' => $item['product_id'],
-                        'requested' => $item['quantity'],
-                        'available' => $current['stock'],
-                        'message' => "Only {$current['stock']} left in stock",
-                    ],
+                throw new AppError(404, 'PRODUCT_NOT_FOUND', 'Product not found', [
+                    ['field' => 'items', 'product_id' => $item['product_id'], 'message' => 'No product with this id'],
                 ]);
             }
-
-            $reserved[] = [
+            $lines[] = [
                 'product_id' => $product['id'],
                 'name' => $product['name'],
                 'price' => $product['price'],
@@ -332,17 +405,6 @@ class ProductsService
             ];
         }
 
-        return $reserved;
-    }
-
-    /**
-     * Gives stock back (for example when an order is cancelled), inside the
-     * caller's transaction. items: [{ product_id, quantity }]
-     */
-    public function releaseStock(array $items): void
-    {
-        foreach (self::sortById($items) as $item) {
-            $this->repo->incrementStock($item['product_id'], $item['quantity']);
-        }
+        return $lines;
     }
 }

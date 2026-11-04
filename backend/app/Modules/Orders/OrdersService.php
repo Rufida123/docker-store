@@ -2,16 +2,24 @@
 
 namespace App\Modules\Orders;
 
+use App\Modules\Inventory\InventoryModule;
 use App\Modules\Notifications\NotificationsModule;
 use App\Modules\Products\ProductsModule;
 use App\Shared\AppError;
 use App\Shared\Events;
+use App\Shared\InventoryError;
+use App\Shared\InventoryTimeout;
+use App\Shared\InventoryUnavailable;
 use App\Shared\Validation;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
+use Throwable;
 
 /**
- * Business rules of the orders module (validation, stock, ownership, status
- * changes). Other modules are only reached through their public classes.
+ * Business rules of the orders module (validation, ownership, status changes,
+ * and the reserve-then-save flow against the inventory service). Other
+ * modules are only reached through their public classes.
  */
 class OrdersService
 {
@@ -34,6 +42,7 @@ class OrdersService
         private OrdersRepository $repo,
         private ProductsModule $products,
         private NotificationsModule $notifications,
+        private InventoryModule $inventory,
     ) {
     }
 
@@ -108,29 +117,81 @@ class OrdersService
     }
 
     /**
+     * Tries to give a reservation back to the inventory. A release that can't
+     * be delivered right now is parked in the outbox and retried by the
+     * scheduler; releasing is idempotent on the inventory side, so retrying
+     * is always safe.
+     */
+    private function releaseOrPark(string $reservationId): void
+    {
+        try {
+            $this->inventory->release($reservationId);
+        } catch (Throwable $e) {
+            $this->repo->outboxAdd($reservationId);
+            Log::warning("release of reservation {$reservationId} failed, parked in the outbox: ".$e->getMessage());
+        }
+    }
+
+    /**
      * POST /orders
-     * One transaction: reserve stock, create the order, its items and its first
-     * history row. If any step fails (unknown product, not enough stock...)
-     * nothing is saved.
+     * The flow: validate, price the lines, reserve ALL the stock with ONE
+     * inventory call (the order's UUID is the reservation id), and only then
+     * save the order. A reservation whose order could not be saved is given
+     * back (compensation).
      */
     public function createOrder(array $user, array $body): array
     {
         $items = self::parseItems($body);
+        $lines = $this->products->getOrderLines($items); // 404 for unknown products
 
-        $orderId = DB::transaction(function () use ($user, $items): string {
-            $reserved = $this->products->reserveStock($items);
-            $id = $this->repo->insertOrder($user['id'], $reserved);
-            $this->repo->insertItems($id, $reserved);
-            $this->repo->insertHistory($id, null, 'pending', $user['id']);
-            $this->notifications->createForOrderEvent([
-                'userId' => $user['id'],
-                'orderId' => $id,
-                'type' => 'order_created',
-                'status' => 'pending',
+        $orderId = (string) Str::uuid();
+
+        try {
+            $result = $this->inventory->reserve($orderId, $items);
+        } catch (InventoryUnavailable) {
+            throw new AppError(503, 'INVENTORY_UNAVAILABLE', 'The inventory service is unavailable right now. Your order was not placed. Please try again in a moment.');
+        } catch (InventoryTimeout) {
+            // The reserve may or may not have landed; a compensating release
+            // settles it either way, thanks to the tombstone. It goes through
+            // the outbox (the scheduler delivers it) instead of a second
+            // synchronous call, so the user never waits for two deadlines.
+            $this->repo->outboxAdd($orderId);
+            throw new AppError(504, 'INVENTORY_TIMEOUT', 'The inventory service did not respond in time. Your order was not placed. Please try again.');
+        }
+
+        if ($result['status'] === 'refused') {
+            $shortage = $result['shortage'];
+            throw new AppError(409, 'INSUFFICIENT_STOCK', 'Not enough stock for this order', [
+                [
+                    'field' => 'items',
+                    'product_id' => $shortage['product_id'],
+                    'requested' => $shortage['requested'],
+                    'available' => $shortage['available'],
+                    'message' => "Only {$shortage['available']} left in stock",
+                ],
             ]);
+        }
+        if ($result['status'] !== 'reserved') {
+            throw new InventoryError("reservation {$orderId} answered with ".$result['status']);
+        }
 
-            return $id;
-        });
+        try {
+            DB::transaction(function () use ($orderId, $user, $lines): void {
+                $this->repo->insertOrder($orderId, $user['id'], $lines);
+                $this->repo->insertItems($orderId, $lines);
+                $this->repo->insertHistory($orderId, null, 'pending', $user['id']);
+                $this->notifications->createForOrderEvent([
+                    'userId' => $user['id'],
+                    'orderId' => $orderId,
+                    'type' => 'order_created',
+                    'status' => 'pending',
+                ]);
+            });
+        } catch (Throwable $e) {
+            // Saving failed after the stock was taken: give it back.
+            $this->releaseOrPark($orderId);
+            throw $e;
+        }
 
         $order = $this->loadOrder($this->repo->findById($orderId));
         Events::publish('order.created', ['orderId' => $orderId, 'userId' => $user['id'], 'total' => $order['total']]);
@@ -234,9 +295,10 @@ class OrdersService
             }
 
             if ($status === 'cancelled') {
-                // Put the reserved stock back, in the same transaction as the status change.
-                $items = $this->repo->findItems($order['id']);
-                $this->products->releaseStock($items);
+                // The release is recorded while the row is still locked, so it
+                // survives a crash between commit and delivery. Only the cancel
+                // that wins the race gets here, so stock is released once.
+                $this->repo->outboxAdd($order['id']);
             }
 
             $this->repo->updateStatus($order['id'], $status);
@@ -257,8 +319,51 @@ class OrdersService
             ];
         });
 
+        if ($change['to'] === 'cancelled') {
+            $this->deliverRelease($change['orderId']);
+        }
+
         Events::publish('order.status_changed', $change);
 
         return $this->loadOrder($this->repo->findById($change['orderId']));
+    }
+
+    /**
+     * Delivers one outbox release now; the row stays for the scheduler when
+     * the inventory can't be reached.
+     */
+    private function deliverRelease(string $reservationId): void
+    {
+        try {
+            $this->inventory->release($reservationId);
+            $this->repo->outboxDelete($reservationId);
+        } catch (Throwable $e) {
+            $this->repo->outboxMarkAttempt($reservationId);
+            Log::warning("release of reservation {$reservationId} failed, kept in the outbox: ".$e->getMessage());
+        }
+    }
+
+    /**
+     * Retries every parked release. Returns [delivered, pending-after].
+     *
+     * @return array{int, int}
+     */
+    public function flushOutbox(): array
+    {
+        $pending = $this->repo->outboxPending();
+        $delivered = 0;
+
+        foreach ($pending as $reservationId) {
+            try {
+                $this->inventory->release($reservationId); // idempotent
+                $this->repo->outboxDelete($reservationId);
+                $delivered++;
+            } catch (Throwable $e) {
+                $this->repo->outboxMarkAttempt($reservationId);
+                Log::warning("outbox release of {$reservationId} failed again: ".$e->getMessage());
+            }
+        }
+
+        return [$delivered, count($pending) - $delivered];
     }
 }
