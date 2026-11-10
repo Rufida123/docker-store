@@ -102,6 +102,11 @@ regenerate them with protoc (https://github.com/protocolbuffers/protobuf/release
 
     protoc --php_out=backend/generated --proto_path=proto proto/inventory/v1/inventory.proto
 
+## Performance
+
+Load tests and the baseline numbers (dataset seeder, k6 scenarios, results and
+the problems to fix next) are in [`docs/performance.md`](docs/performance.md).
+
 ## Endpoints
 
 Every URL is versioned under `/api/v1` (except `/health`, `/api-docs` and `/uploads`).

@@ -27,5 +27,12 @@ class AppServiceProvider extends ServiceProvider
 
         // Push notifications react to order events published after commit.
         \App\Modules\Notifications\NotificationsModule::subscribePushListeners();
+
+        // Performance tests only: X-Query-Count / X-Query-Time-Ms headers.
+        // When PERF_QUERY_LOG is off the middleware is not in the stack at all.
+        if (config('store.perf.query_log')) {
+            $this->app->make(\Illuminate\Contracts\Http\Kernel::class)
+                ->prependMiddleware(\App\Shared\Http\Middleware\QueryCounter::class);
+        }
     }
 }

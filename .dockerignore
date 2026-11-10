@@ -7,3 +7,5 @@ secrets
 **/vendor
 frontend/dist
 backend/storage/logs/*
+# Local Laravel caches (they list dev-only packages the image does not install)
+backend/bootstrap/cache/*.php

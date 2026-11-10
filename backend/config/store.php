@@ -22,6 +22,11 @@ return [
         'connect_timeout_ms' => (int) env('INVENTORY_CONNECT_TIMEOUT_MS', 500),
     ],
 
+    // Load tests only (docs/performance.md): adds X-Query-Count / X-Query-Time-Ms headers.
+    'perf' => [
+        'query_log' => filter_var(env('PERF_QUERY_LOG', false), FILTER_VALIDATE_BOOLEAN),
+    ],
+
     'firebase' => [
         'service_account_file' => env('FIREBASE_SERVICE_ACCOUNT_FILE', ''),
     ],

@@ -54,6 +54,8 @@ services:
       INVENTORY_GRPC_ADDR: inventory:50051
       INVENTORY_TIMEOUT_MS: 2000
       INVENTORY_CONNECT_TIMEOUT_MS: 500
+      # Load tests only: X-Query-Count / X-Query-Time-Ms headers (docs/performance.md).
+      PERF_QUERY_LOG: ${PERF_QUERY_LOG:-false}
     ports:
       - "${PORT}:3000"
     volumes:
@@ -122,6 +124,38 @@ services:
       - backend
     ports:
       - "${FRONTEND_PORT:-8080}:80"
+
+  # ---- load testing (docs/performance.md); only with --profile perf ----
+
+  # Backend image with APP_ENV=perf, for `php artisan perf:seed`.
+  #   docker compose --profile perf run --rm perf-tools perf:seed --fresh
+  perf-tools:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    profiles: ["perf"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      <<: *backend-environment
+      APP_ENV: perf
+    entrypoint: ["php", "artisan"]
+    command: ["perf:seed"]
+
+  # k6 load test against the backend on the compose network.
+  #   docker compose --profile perf run --rm -e PROFILE=smoke k6
+  k6:
+    image: grafana/k6:0.54.0
+    profiles: ["perf"]
+    user: "0" # write results into the bind mount on any host
+    environment:
+      BASE_URL: ${PERF_BASE_URL:-http://backend:3000/api/v1}
+      RESULTS_DIR: /results
+    volumes:
+      - ./perf/k6:/scripts:ro
+      - ./perf/results:/results
+    command: ["run", "/scripts/store.js"]
 
 volumes:
   pgdata_laravel:
