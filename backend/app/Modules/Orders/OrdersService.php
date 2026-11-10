@@ -220,6 +220,7 @@ class OrdersService
 
     /**
      * GET /orders?page=&limit=&status=&user_id=
+     * Every order in the page includes its items (not its history).
      * Customers always get their own orders (a user_id in the query is ignored).
      * Admins get all orders and may filter by user_id.
      */
@@ -250,6 +251,14 @@ class OrdersService
         }
 
         ['rows' => $rows, 'total' => $total] = $this->repo->list($userId, $status, $pagination['limit'], $pagination['offset']);
+
+        // Each order carries its items, all fetched in one query for the
+        // whole page: 3 queries per request whatever the page size.
+        $items = $this->repo->findItemsForOrders(array_column($rows, 'id'));
+        foreach ($rows as &$row) {
+            $row['items'] = $items[$row['id']] ?? [];
+        }
+        unset($row);
 
         return Validation::paginated($rows, $pagination, $total);
     }

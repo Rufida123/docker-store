@@ -8,7 +8,7 @@ the same request rate.
 
 Contents: [dataset](#1-dataset) · [running the load test](#2-load-test) ·
 [environment](#3-environment) · [baseline](#4-baseline-results) · [capacity](#41-capacity-stepped-load) · [120 req/s](#42-baseline-at-120-reqs-high-load) ·
-[observed problems](#5-observed-problems-to-fix-in-step-2)
+[observed problems](#5-observed-problems-to-fix-in-step-2) · [step 2](#6-step-2-optimizations)
 
 ## 1. Dataset
 
@@ -367,3 +367,207 @@ Smaller notes:
   user, 1.2 ms). Fine now; grows linearly with history.
 - `CACHE_STORE=database`: the login limiter writes to the `cache` table. Not
   in the load mix, but each login costs extra writes.
+
+## 6. Step 2: optimizations
+
+One optimization per change, each followed by a quick check. The full
+before/after measurement is done at the end, back to back (below).
+
+**How changes are measured**
+
+- **Quick check after each change:** 30 s warm-up, then one 2-minute run at
+  **100 req/s** on the current data (no re-seed). 100 req/s, not 120: 120 is
+  too close to this machine's ceiling for a single run to be reliable (see
+  "Observed behavior" below).
+- **Final comparison, back to back:** in one session, on a quiet machine,
+  fresh seed, warm-up, 3 runs at 40 and at 120 req/s, median: first with the
+  baseline commit (`833dc94`), then with the final commit. Both sets come from
+  the same machine state, which is fairer than comparing against the numbers
+  in section 4, taken on another day under other conditions.
+
+### 6.1 Pagination indexes include `id`
+
+Every list sorts by `(created_at DESC, id DESC)`, but the indexes covered only
+`created_at`, so PostgreSQL added an Incremental Sort for the `id` tie-breaker
+and sorted every row skipped by `OFFSET`. Migration
+`0001_01_03_000001_add_id_to_pagination_indexes` replaces the four list
+indexes:
+
+| Old index | New index |
+|---|---|
+| `products (created_at DESC)` | `products (created_at DESC, id DESC)` |
+| `products (category, created_at DESC)` | `products (category, created_at DESC, id DESC)` |
+| `orders (user_id, created_at DESC)` | `orders (user_id, created_at DESC, id DESC)` |
+| `orders (status, created_at DESC)` | `orders (status, created_at DESC, id DESC)` |
+
+It uses plain `CREATE INDEX` (a few hundred ms on the perf dataset). On a large
+live table, build the indexes with `CREATE INDEX CONCURRENTLY` outside a
+transaction instead.
+
+`EXPLAIN (ANALYZE, BUFFERS)` on the perf dataset:
+
+| Query | Before | After |
+|---|---|---|
+| Q1 catalog page 1 | 0.19 ms (Index Scan + Incremental Sort) | 0.10 ms (Index Scan only) |
+| Q2 catalog deep page, `OFFSET 49000` | 43.96 ms (Incremental Sort of 49 020 rows) | 28.29 ms (Index Scan only) |
+| Q3 category `home`, page 100 | 6.50 ms (Bitmap scan + top-N heapsort) | 5.69 ms (same plan) |
+| Q4 heavy user's orders, page 11 | 1.05 ms (Incremental Sort) | 0.60 ms (Index Scan only) |
+| Q5 admin orders `status=pending`, page 50 | 3.91 ms (Incremental Sort) | 2.91 ms (Index Scan only) |
+
+Q2 before:
+
+```
+Limit (actual time=43.892..43.896 rows=20 loops=1)
+  ->  Incremental Sort (actual time=0.154..42.262 rows=49020 loops=1)
+        Sort Key: created_at DESC, id DESC
+        Presorted Key: created_at
+        Full-sort Groups: 1532  Sort Method: quicksort
+        ->  Index Scan using idx_products_created on products (actual time=0.080..28.869 rows=49021 loops=1)
+Execution Time: 43.958 ms
+```
+
+Q2 after:
+
+```
+Limit (actual time=28.222..28.232 rows=20 loops=1)
+  ->  Index Scan using idx_products_created_id on products (actual time=0.015..26.440 rows=49020 loops=1)
+Execution Time: 28.285 ms
+```
+
+Quick check (120 req/s, the rate used before the switch to 100):
+`browse_list` p95 133.2 → 87.5 ms (below the lowest of the three baseline
+runs, 100.5 ms); the other endpoints stayed within the baseline's range.
+
+### 6.2 Catalog pages read with a deferred join
+
+The index removed the sort, but the deep page still read all 49 020 skipped
+rows from the table. `ProductsRepository::list` now picks the page's ids with
+an index-only scan and reads only those 20 rows (the API and the order of the
+rows are unchanged; checked on pages 1, 3, 100 and 2 451, with and without a
+category):
+
+```sql
+SELECT p.* FROM (SELECT id, created_at FROM products [WHERE category = ?]
+                  ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?) page
+JOIN products p ON p.id = page.id
+ORDER BY page.created_at DESC, page.id DESC
+```
+
+| Query | After 6.1 | After 6.2 |
+|---|---|---|
+| Q1 catalog page 1 | 0.10 ms | 0.29 ms (20 primary-key lookups; negligible) |
+| Q2 catalog deep page | 28.29 ms | **9.96 ms** |
+| Q3 category page 100 | 5.69 ms | **0.73 ms** |
+
+Q2 after:
+
+```
+Nested Loop (actual time=9.224..9.837 rows=20 loops=1)
+  ->  Limit
+        ->  Index Only Scan using idx_products_created_id on products (actual time=0.020..6.702 rows=49020 loops=1)
+              Heap Fetches: 0
+  ->  Index Scan using products_pkey on products p (actual time=0.030..0.030 rows=1 loops=20)
+        Index Cond: (id = products.id)
+Execution Time: 9.956 ms
+```
+
+`Heap Fetches: 0` needs the table's visibility map to be current (autovacuum
+keeps it so). On a table with many recent updates, part of the index-only scan
+reads the table again, and the gain is smaller.
+
+The first quick checks at 120 req/s were not usable (see the collapse below).
+Repeated at 100 req/s on a quiet machine, in the table of 6.3.
+
+### 6.3 Order items in `GET /orders`, one query per page
+
+**No N+1 existed in the API.** With `PERF_QUERY_LOG=true` every endpoint ran a
+fixed number of queries (section 4), and no service method queries inside a
+loop. The only loop is `flushOutbox`, which releases one reservation per
+iteration by design (a gRPC call each, scheduler only).
+
+**But the frontend needed the items of every order in the list.** The orders
+page shows an item count per order (`o.items.length`), and `GET /orders`
+returned no items, so the column always showed "—". The obvious fix, calling
+`findItems()` for each order, would have been a classic N+1: 20 extra
+queries per page. Instead:
+
+- `OrdersRepository::findItemsForOrders(array $orderIds)` loads the items of
+  the whole page in one query (`WHERE order_id = ANY(?::uuid[])`, served by
+  the `(order_id, product_id)` unique index) and groups them by order in PHP.
+- `GET /orders` now returns `items` for each order (not the status history;
+  `GET /orders/{id}` has it). `docs/openapi.yaml`: new `OrderListEntry` schema.
+- `tests/Feature/OrderListItemsTest.php` checks the result and that the query
+  count is the same, 3 (page, count, items), for 2 or 20 orders; an empty
+  page runs 2 (no items query).
+
+`EXPLAIN (ANALYZE, BUFFERS)` for the first page of a heavy user (20 orders,
+45 items; the order ids come from an InitPlan here to keep the test
+self-contained):
+
+```
+Incremental Sort (actual time=1.008..1.072 rows=45 loops=1)
+  Sort Key: order_items.order_id, order_items.product_name
+  Presorted Key: order_items.order_id
+  ->  Index Scan using order_items_order_id_product_id_key on order_items (actual time=0.757..0.985 rows=45 loops=1)
+        Index Cond: (order_id = ANY ($0))
+        Buffers: shared hit=108
+Execution Time: 1.186 ms   (of which the items lookup: ~0.23 ms)
+```
+
+Quick checks at 100 req/s, quiet machine (heavy programs closed, AC power),
+2026-11-10. Change 3 measured right after change 2, on the same data:
+
+| Endpoint | After 6.2: p50 / p95 / p99 | After 6.3: p50 / p95 / p99 |
+|---|---|---|
+| `browse_list` | 54.8 / 192.1 / 478.3 | 52.5 / 76.3 / 102.6 |
+| `product_detail` | 39.7 / 146.6 / 448.3 | 38.1 / 57.6 / 76.7 |
+| `my_orders` | 38.4 / 118.0 / 385.3 | **44.3** / 62.6 / 83.2 |
+| `order_detail` | 44.1 / 129.4 / 465.6 | 42.4 / 61.1 / 83.8 |
+| `my_notifications` | 39.6 / 122.5 / 390.2 | 38.0 / 56.2 / 71.4 |
+| `create_order` | 84.4 / 276.9 / 763.5 | 81.2 / 115.1 / 143.3 |
+
+- **The cost of 6.3 is in `my_orders` p50: +6 ms.** One more query and a
+  larger response (about 45–60 item rows per page). That is the price of
+  returning the data the page needs, still far below 20 per-order queries.
+- **The p95/p99 difference between the two runs is not caused by 6.3.** The
+  first run's tails are high for every endpoint at once, including ones 6.3
+  does not touch (`product_detail`, `my_notifications`). That pattern is a
+  machine-wide stall (as in the collapse below), not one query. Only the p50
+  column can be compared between these two single runs; the back-to-back
+  final measurement will settle the tails.
+
+### Observed behavior
+
+**Collapse at 120 req/s: queueing close to capacity (2026-11-10).**
+After 6.2, two quick runs at 120 req/s fell apart: p50 went from ~50 ms to
+5–9 s for **every** endpoint at once, p95 to 12–17 s, with 1 100–1 600 dropped
+iterations and no errors. What we checked:
+
+- **Not the code change.** Reverting 6.2 and running again gave the same
+  collapse (p50 4.8 s).
+- **Not the database state.** No dead rows, no autovacuum running, statistics
+  fresh, the expected index used by every query.
+- **Not general slowness.** A run at 40 req/s right after was normal (p50
+  35–44 ms, better than the baseline).
+- **The machine had less CPU to spare.** During the collapse PostgreSQL used
+  ~570 % CPU and the backend ~520 %, about all 12 cores, more than during the
+  160 req/s step run. A Visual Studio Installer update had started
+  downloading in the background (`BackgroundDownload.exe`, started 19:44);
+  the last good run ended about 19:40 and the first collapse started about
+  19:45. Even at 100 req/s, p50 stayed normal (43–86 ms) but p95 reached
+  1.3–1.5 s while it was running.
+
+Why it collapses instead of slowing down gradually: with a fixed arrival rate,
+when the server falls even slightly behind, requests start to wait. More
+waiting requests mean more PHP threads and PostgreSQL connections working at
+the same time, which compete for the same cores, so each request takes longer,
+so even more requests wait. Below the ceiling the system recovers from a short
+stall; right next to it, one stall tips it into a queue it cannot drain.
+120 req/s (~70 % of the 165 req/s ceiling measured on a quiet machine) leaves
+too little margin on a laptop that shares its CPUs with everything else.
+That is also why p99 already varied 2–4× between the three 120 req/s baseline
+runs.
+
+Consequences for the method: quick checks at 100 req/s, heavy programs closed,
+laptop on AC power, and before/after measured back to back (see the top of
+this section).

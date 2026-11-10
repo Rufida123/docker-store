@@ -288,7 +288,7 @@ paths:
       tags: [Orders]
       operationId: listOrders
       summary: List orders
-      description: Customers receive only their own orders. Admins receive all orders and may filter by `user_id`.
+      description: Customers receive only their own orders. Admins receive all orders and may filter by `user_id`. Every order includes its items (not its status history; GET /orders/{id} has it). Every order includes its items (not its status history; use GET /orders/{id} for that).
       security: [{ bearerAuth: [] }]
       parameters:
         - $ref: '#/components/parameters/Page'
@@ -713,11 +713,19 @@ components:
           properties:
             items: { type: array, items: { $ref: '#/components/schemas/OrderItem' }, readOnly: true }
             history: { type: array, items: { $ref: '#/components/schemas/OrderHistoryEntry' }, readOnly: true }
+    OrderListEntry:
+      description: An order in a list page, with its items (fetched for the whole page in one query) but without its status history.
+      allOf:
+        - $ref: '#/components/schemas/OrderHeader'
+        - type: object
+          required: [items]
+          properties:
+            items: { type: array, items: { $ref: '#/components/schemas/OrderItem' }, readOnly: true }
     OrderPage:
       type: object
       required: [data, pagination]
       properties:
-        data: { type: array, items: { $ref: '#/components/schemas/OrderHeader' } }
+        data: { type: array, items: { $ref: '#/components/schemas/OrderListEntry' } }
         pagination: { $ref: '#/components/schemas/Pagination' }
     OrderStatusChange:
       type: object
