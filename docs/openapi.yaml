@@ -134,16 +134,22 @@ paths:
       tags: [Products]
       operationId: listProducts
       summary: List products
+      description: Revalidation with ETag (see `If-None-Match`). Every page, category and limit has its own ETag.
       security: []
       parameters:
         - $ref: '#/components/parameters/Category'
         - $ref: '#/components/parameters/Page'
         - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/IfNoneMatch'
       responses:
         '200':
           description: Products ordered newest first.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlRevalidate' }
           content:
             application/json: { schema: { $ref: '#/components/schemas/ProductPage' } }
+        '304': { $ref: '#/components/responses/NotModified' }
         '400': { $ref: '#/components/responses/ValidationError' }
     post:
       tags: [Products]
@@ -185,12 +191,19 @@ paths:
       tags: [Products]
       operationId: getProduct
       summary: Get a product
+      description: Revalidation with ETag (see `If-None-Match`). The ETag changes with any field, stock and stock_status included.
       security: []
+      parameters:
+        - $ref: '#/components/parameters/IfNoneMatch'
       responses:
         '200':
           description: Product.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlRevalidate' }
           content:
             application/json: { schema: { $ref: '#/components/schemas/Product' } }
+        '304': { $ref: '#/components/responses/NotModified' }
         '400': { $ref: '#/components/responses/ValidationError' }
         '404': { $ref: '#/components/responses/ProductNotFound' }
     patch:
@@ -473,6 +486,12 @@ components:
       bearerFormat: JWT
       description: "Paste the JWT returned by `/api/v1/auth/login`. Swagger UI sends it as `Authorization: Bearer <token>`."
   parameters:
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      description: ETag(s) of copies the client already has, as in RFC 9110 - one or more comma-separated entity tags (weak `W/"..."` tags match too) or `*`. When one matches the current ETag the answer is 304 with no body. Browsers send it on their own.
+      schema: { type: string, example: '"cc5ba0768cf650f8ea7932602cccd306"' }
     UuidPath:
       name: id
       in: path
@@ -490,7 +509,19 @@ components:
       name: category
       in: query
       schema: { type: string, minLength: 1, maxLength: 100 }
+  headers:
+    ETag:
+      description: Strong validator, a hash of the response body. Changes whenever any field of the response changes.
+      schema: { type: string, example: '"cc5ba0768cf650f8ea7932602cccd306"' }
+    CacheControlRevalidate:
+      description: Value `no-cache, public` - a client or proxy may keep a copy but must revalidate it on every use (no max-age), so an edit is visible on the next request. The response is the same for every caller.
+      schema: { type: string, example: 'no-cache, public' }
   responses:
+    NotModified:
+      description: Not modified - the copy matching `If-None-Match` is current. Empty body.
+      headers:
+        ETag: { $ref: '#/components/headers/ETag' }
+        Cache-Control: { $ref: '#/components/headers/CacheControlRevalidate' }
     ValidationError:
       description: Request data is invalid.
       content:

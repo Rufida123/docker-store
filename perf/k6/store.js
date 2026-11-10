@@ -25,6 +25,8 @@ const RATE = Number(__ENV.RATE || PROFILES[PROFILE].rate);
 const DURATION = __ENV.DURATION || PROFILES[PROFILE].duration;
 const LABEL = __ENV.LABEL || PROFILE;
 const RESULTS_DIR = __ENV.RESULTS_DIR || '/results';
+// Like a browser: remember the ETag per URL and send If-None-Match (ETAG=0 turns it off).
+const SEND_ETAG = (__ENV.ETAG || '1') !== '0';
 
 const PRODUCTS = Number(__ENV.PRODUCTS || 50000);
 const USERS = Number(__ENV.USERS || 5000);
@@ -54,6 +56,7 @@ randomSeed(Number(__ENV.SEED || 42) * 1000 + (__VU || 0));
 // counted on their own and are NOT part of the error rate.
 const STATUS = {
   ok_2xx: new Counter('status_2xx'),
+  not_modified_304: new Counter('status_304'),
   stock_409: new Counter('status_409_stock'),
   too_many_429: new Counter('status_429'),
   other_4xx: new Counter('status_4xx_other'),
@@ -61,6 +64,9 @@ const STATUS = {
   network: new Counter('status_network'),
 };
 const realErrors = new Rate('real_errors'); // 5xx, network failures, unexpected 4xx
+// Response time of full 200 answers vs 304 revalidations.
+const duration200 = new Trend('duration_200', true);
+const duration304 = new Trend('duration_304', true);
 const queryCount = new Trend('query_count'); // from X-Query-Count (PERF_QUERY_LOG=true only)
 const queryTime = new Trend('query_time_ms'); // from X-Query-Time-Ms
 // Catalog cache lookups per request, from X-Cache-Hits / X-Cache-Misses (PERF_QUERY_LOG=true only).
@@ -74,6 +80,9 @@ for (const e of ENDPOINTS) {
   thresholds[`http_req_duration{endpoint:${e}}`] = ['max>=0'];
   thresholds[`http_reqs{endpoint:${e}}`] = ['count>=0'];
   thresholds[`real_errors{endpoint:${e}}`] = ['rate>=0'];
+  thresholds[`duration_200{endpoint:${e}}`] = ['max>=0'];
+  thresholds[`duration_304{endpoint:${e}}`] = ['max>=0'];
+  thresholds[`data_received{endpoint:${e}}`] = ['count>=0'];
   thresholds[`query_count{endpoint:${e}}`] = ['max>=0'];
   thresholds[`query_time_ms{endpoint:${e}}`] = ['max>=0'];
   thresholds[`cache_hits{endpoint:${e}}`] = ['count>=0'];
@@ -108,6 +117,7 @@ function record(res, endpoint) {
   const tags = { endpoint };
   let category;
   if (res.status === 0) category = 'network';
+  else if (res.status === 304) category = 'not_modified_304';
   else if (res.status >= 200 && res.status < 300) category = 'ok_2xx';
   else if (res.status === 409 && errorCode(res) === 'INSUFFICIENT_STOCK') category = 'stock_409';
   else if (res.status === 429) category = 'too_many_429';
@@ -115,6 +125,8 @@ function record(res, endpoint) {
   else category = 'other_4xx';
 
   STATUS[category].add(1, tags);
+  if (res.status === 200) duration200.add(res.timings.duration, tags);
+  if (res.status === 304) duration304.add(res.timings.duration, tags);
   realErrors.add(category === 'network' || category === 'server_5xx' || category === 'other_4xx', tags);
 
   const qc = res.headers['X-Query-Count'];
@@ -132,11 +144,15 @@ function record(res, endpoint) {
 
 const authHeaders = (token) => ({ Authorization: `Bearer ${token}`, Accept: 'application/json' });
 
-function get(path, endpoint, token) {
-  const res = http.get(`${BASE_URL}${path}`, {
-    headers: token ? authHeaders(token) : { Accept: 'application/json' },
-    tags: { endpoint, name: endpoint },
-  });
+// Per VU (one VU behaves like one browser): URL -> last ETag received.
+const etags = {};
+
+function get(path, endpoint, token, revalidate = false) {
+  const url = `${BASE_URL}${path}`;
+  const headers = token ? authHeaders(token) : { Accept: 'application/json' };
+  if (revalidate && SEND_ETAG && etags[url]) headers['If-None-Match'] = etags[url];
+  const res = http.get(url, { headers, tags: { endpoint, name: endpoint } });
+  if (revalidate && res.status === 200 && res.headers['Etag']) etags[url] = res.headers['Etag'];
   return record(res, endpoint);
 }
 
@@ -209,13 +225,13 @@ function customer(data) {
 export function browse_list() {
   // Mostly the first pages, sometimes deep in the catalog (large OFFSET).
   const page = Math.random() < 0.7 ? randInt(1, 5) : randInt(1, CATALOG_PAGES);
-  const res = get(`/products?page=${page}`, 'browse_list');
-  check(res, { 'browse_list 200': (r) => r.status === 200 });
+  const res = get(`/products?page=${page}`, 'browse_list', null, true);
+  check(res, { 'browse_list 200/304': (r) => r.status === 200 || r.status === 304 });
 }
 
 export function product_detail() {
-  const res = get(`/products/${perfUuid(PRODUCT, randInt(1, PRODUCTS))}`, 'product_detail');
-  check(res, { 'product_detail 200': (r) => r.status === 200 });
+  const res = get(`/products/${perfUuid(PRODUCT, randInt(1, PRODUCTS))}`, 'product_detail', null, true);
+  check(res, { 'product_detail 200/304': (r) => r.status === 200 || r.status === 304 });
 }
 
 export function my_orders(data) {
@@ -284,6 +300,13 @@ function endpointRows(data) {
         return h + x > 0 ? h / (h + x) : null;
       })(),
       avg_query_time_ms: hasQueries ? qt.avg : null,
+      not_modified_ratio: (() => {
+        const n = m(`http_reqs{endpoint:${e}}`).count || 0;
+        return n > 0 ? (status.not_modified_304 || 0) / n : 0;
+      })(),
+      latency_200: (({ med, 'p(95)': p95, 'p(99)': p99 }) => ({ p50: med, p95, p99 }))(m(`duration_200{endpoint:${e}}`)),
+      latency_304: (({ med, 'p(95)': p95, 'p(99)': p99 }) => ({ p50: med, p95, p99 }))(m(`duration_304{endpoint:${e}}`)),
+      bytes_received: m(`data_received{endpoint:${e}}`).count || 0,
     };
   });
 }
@@ -291,6 +314,7 @@ function endpointRows(data) {
 export function handleSummary(data) {
   const rows = endpointRows(data);
   const dropped = data.metrics.dropped_iterations ? data.metrics.dropped_iterations.values.count : 0;
+  const received = data.metrics.data_received ? data.metrics.data_received.values.count : 0;
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const file = `${RESULTS_DIR}/${LABEL}-${stamp}.json`;
 
@@ -302,6 +326,8 @@ export function handleSummary(data) {
     base_url: BASE_URL,
     finished_at: new Date().toISOString(),
     dropped_iterations: dropped,
+    data_received_bytes: received,
+    etag_revalidation: SEND_ETAG,
     endpoints: rows,
     k6: data,
   };
@@ -311,6 +337,14 @@ export function handleSummary(data) {
     '',
     `Per endpoint (${LABEL}, ${RATE} req/s for ${DURATION}, dropped iterations: ${dropped}):`,
     renderTable(rows),
+    '',
+    `200 vs 304 (ms, p50 / p95 / p99), If-None-Match ${SEND_ETAG ? 'on' : 'off'}:`,
+    ...rows.filter((r) => r.endpoint === 'browse_list' || r.endpoint === 'product_detail').map((r) => {
+      const f = (x) => (x === undefined || x === null ? '-' : x.toFixed(1));
+      const t = (l) => `${f(l.p50)} / ${f(l.p95)} / ${f(l.p99)}`;
+      return `  ${r.endpoint.padEnd(16)} 200: ${t(r.latency_200)}   304: ${r.not_modified_ratio ? t(r.latency_304) : '-'}   (304 = ${(r.not_modified_ratio * 100).toFixed(1)} %, received ${(r.bytes_received / 1048576).toFixed(2)} MiB)`;
+    }),
+    `data_received: ${(received / 1048576).toFixed(1)} MiB in total (setup included)`,
     '',
     `Result written to ${file}`,
     '',

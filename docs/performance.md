@@ -708,6 +708,163 @@ with the query counter off; then a separate 30 s run with
   a cross-check.
 - The other endpoints are not cached and stayed within run-to-run variation.
 
+### 6.5 HTTP caching: ETag and 304
+
+**Scope:** `GET /products` and `GET /products/{id}` only (and `HEAD` on them).
+
+**Behavior** (`App\Shared\Http\Middleware\ETagRevalidation`, applied to those
+two routes in `app/Modules/Products/routes.php`):
+
+- A `200` gets `ETag: "<hash of the body>"` and
+  `Cache-Control: no-cache, public`. `no-cache` means "you may keep a copy,
+  but ask me every time": an edit is visible on the very next request. There
+  is **no `max-age`**: with one, a client would reuse its copy without asking
+  and miss an edit until it expired.
+- `public` is there because the body is the same for every caller, and
+  because Symfony appends `private` to any `Cache-Control` that names neither,
+  so a bare `no-cache` cannot be sent. `public, no-cache` lets a future proxy
+  or CDN store the response too, still revalidating every time.
+- When `If-None-Match` matches: `304 Not Modified`, empty body, same `ETag` and
+  `Cache-Control`. Matching follows RFC 9110: a comma-separated list, `*`, and
+  the weak comparison (`W/"x"` matches `"x"`).
+- Errors (400, 404, 5xx), redirects and writes get no `ETag`, and a 304 never
+  replaces an error: `If-None-Match: *` on a missing product is still a 404.
+- `HEAD` gets the same `ETag` as the `GET`: Laravel empties a HEAD body before
+  route middleware runs, so the middleware builds the response as a GET and
+  drops the body itself (a test caught this: HEAD first had the ETag of an
+  empty string).
+- **Same for every user:** both endpoints are public and never read the user
+  or role (the frontend calls them without a token), so no `Vary:
+  Authorization`. If they ever return role-dependent data, add it.
+
+**How the ETag is computed: a hash of the final body (xxh128).** Correct by
+construction: any change in any field changes the bytes, so it changes the
+ETag. That covers the price and the other fields, `stock` and `stock_status`
+(inventory up vs down give different bodies, so different ETags), and the
+page, category and limit (different bodies). Equivalent requests
+(`?page=1&limit=20` and no parameters) have the same body, so the same ETag,
+which is right: it identifies the representation, not the URL. A
+version-based ETag (catalog version + `updated_at` + stock of every product on
+the page + `stock_status` + parameters) would skip the hashing, but it would
+have to list every input of the response, and one input forgotten (now or when
+a field is added) means a wrong 304 and stale data on screen. Hashing ~10 KB
+with xxh128 costs microseconds, and the body is built from Redis anyway.
+Measured with the freshness proof: putting price and stock back to their old
+values still gives a new ETag, because `updated_at` changed, so the body did.
+
+**What a 304 saves here, and what it doesn't.** The server does the same work
+for a 304 as for a 200: Laravel boots, reads Redis (or the database), builds
+the JSON and hashes it. A 304 saves the **transfer of the body** (a catalog
+page is ~10 KB, a 304 is a few hundred bytes of headers) and the **client's
+work** (parsing the JSON and re-rendering). On a phone or a slow network that
+is most of the wait; in our load test, k6 runs on the same machine as the API,
+so the network is nearly free and the server-side time barely changes.
+
+**Nothing in between breaks it** (checked live):
+
+- No compression on the way: Caddy has no `encode` directive and the
+  frontend's nginx has no `gzip`. (A server that gzips can turn a strong ETag
+  into a weak `W/` one; the weak comparison in `If-None-Match` handles that
+  anyway.) A request with `Accept-Encoding: gzip` gets the same strong ETag.
+- Through the frontend's nginx (`:8080`) the `ETag`, `If-None-Match` and the
+  304 pass unchanged.
+- No CORS: the frontend reaches the API on the same origin (nginx in Docker,
+  the Vite proxy in development), and the browser revalidates by itself, so
+  JavaScript never needs to read the `ETag` and no
+  `Access-Control-Expose-Headers` is needed.
+
+**Tests** (`tests/Feature/ProductsEtagTest.php`): first request 200 with an
+ETag and `no-cache`; the same ETag gives 304 with an empty body; an admin edit
+(`PATCH` with an admin token) gives 200, the new data and a new ETag for the
+old one; `AdjustStock` gives a new ETag; inventory up vs down give different
+ETags; different page / category / limit give different ETags and an
+equivalent request the same one; 404 and 400 never get an ETag or a 304, even
+with `*`; writes get no ETag; lists, `*` and `W/` in `If-None-Match`; HEAD has
+the GET's ETag; the matcher itself against RFC 9110 cases.
+
+**Freshness proof** (`docs/proofs/etag-freshness.js`, required by the
+assignment):
+
+```powershell
+$env:ADMIN_EMAIL="admin@example.com"; $env:ADMIN_PASSWORD="<from .env>"
+node docs/proofs/etag-freshness.js
+```
+
+Output on 2026-11-10 (Wireless Mouse sample product):
+
+```
+1. First read
+   GET: 200  ETag "680adaafd2894057349731131badd5ba"  Cache-Control "no-cache, public"  body 265 B  price 19.99, stock 496
+2. Same request with If-None-Match: <that ETag>
+   GET: 304  ETag "680adaafd2894057349731131badd5ba"  body 0 B
+3. Admin changes the price 19.99 -> 20.99 and adds 5 to the stock
+   PATCH price: 200, PATCH stock: 200
+4. Immediately: GET with the OLD ETag
+   GET: 200  ETag "d99f808a9edd7dd52d077d35cf2a1c02"  body 265 B  price 20.99, stock 501
+5. GET with the NEW ETag
+   GET: 304  ETag "d99f808a9edd7dd52d077d35cf2a1c02"  body 0 B
+6. Put the product back
+ALL CHECKS PASSED (9 checks)
+```
+
+The edit is visible on the first request after it, for a client that still
+holds the old ETag: the Redis entry is invalidated after commit (6.4), so the
+body is new, so the ETag is new, so the old one no longer matches.
+
+**k6: a client that revalidates.** Each VU keeps the last ETag per URL and
+sends it as `If-None-Match` on `browse_list` and `product_detail`, as a
+browser does (`ETAG=0` turns it off). 304s are counted as their own category
+(not as errors), with separate response-time trends for 200 and 304, the 304
+ratio, and bytes received per endpoint.
+
+#### Quick check at 100 req/s
+
+Two runs back to back on the same data and the same machine state, each after
+a 30 s warm-up: `ETAG=0` (the client never sends `If-None-Match`, which is the
+previous step's behavior) and `ETAG=1` (it revalidates like a browser).
+2026-11-10.
+
+| | `ETAG=0` (as in 6.4) | `ETAG=1` |
+|---|---|---|
+| `browse_list` p50 / p95 / p99 | 15.6 / 67.6 / 93.8 ms | 14.0 / 57.3 / 67.9 ms |
+| `browse_list` 304 ratio | — | **60.7 %** |
+| `browse_list` 200 vs 304 (p50 / p95 / p99) | 200: 15.6 / 67.6 / 93.8 | 200: 27.0 / 63.0 / 76.2 · **304: 12.7 / 23.3 / 30.3** |
+| `browse_list` bytes received | 31.19 MiB | **14.12 MiB (−55 %)** |
+| `product_detail` p50 / p95 / p99 | 42.1 / 66.7 / 100.6 ms | 38.7 / 52.6 / 66.8 ms |
+| `product_detail` 304 ratio | — | 0.0 % (1 request in 3 001) |
+| `product_detail` bytes received | 3.65 MiB | 3.65 MiB |
+| All data received (setup included) | 79.6 MiB | 62.9 MiB (−21 %) |
+
+All requests: 0 errors, 0 dropped iterations.
+
+What the numbers say:
+
+- **The bytes are the clear win.** 60.7 % of catalog requests were answered
+  with a 304, and the catalog's received bytes fell by 55 %. That is what an
+  ETag saves: the body on the wire and the client's work with it.
+- **A 304 is faster mostly because of what is not sent and parsed.** 304 p50
+  12.7 ms. The server work is the same as for a 200 (boot, Redis, JSON, hash),
+  so the gap to a fast 200 is a few ms here, where k6 sits next to the API; on
+  a real network the body transfer is a larger share of the wait.
+- **The "200" column in the `ETAG=1` run is not comparable to the `ETAG=0`
+  run** (27.0 vs 15.6 ms p50). It is a different mix: the requests that still
+  get a 200 are the ones whose ETag the VU did not have or that changed,
+  mostly deep pages seen for the first time, which are also cache misses in
+  Redis. The fast repeat visits moved into the 304 column.
+- **Product detail gains nothing in this test, by design of the test.** A VU
+  asks for a random product among 50 000, so it almost never asks for the
+  same one twice, and a 304 needs a previous copy. A real visitor going back
+  to a product page would get one.
+- **The other endpoints were also 2–4 ms faster in the second run**, though
+  they don't use ETags at all. That is run-to-run variation (and slightly less
+  CPU load from smaller responses), and it puts the p50 differences above in
+  proportion: the bytes and the 304 ratio are the solid results; single-run
+  p95/p99 differences are not.
+- **VUs revalidate more than browsers would.** A VU makes thousands of
+  requests and keeps its ETags for the whole run, so the 60.7 % is an upper
+  range for repeat visits to the first catalog pages, not a prediction for
+  real users.
+
 ### Observed behavior
 
 **Collapse at 120 req/s: queueing close to capacity (2026-11-10).**
