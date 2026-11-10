@@ -47,10 +47,17 @@ class ProductsRepository
             $whereSql = 'WHERE category = ?';
         }
 
+        // Deferred join: the page's ids come from an index-only scan of
+        // (category,) created_at, id, and only those 20 rows are read from
+        // the table. A plain LIMIT/OFFSET read every skipped row in full
+        // (deep page: 28 ms -> 10 ms, docs/performance.md).
         $page = DB::select(
-            'SELECT '.self::PRODUCT_COLUMNS." FROM products {$whereSql}
-              ORDER BY created_at DESC, id DESC
-              LIMIT ? OFFSET ?",
+            'SELECT '.self::prefixed('p')."
+               FROM (SELECT id, created_at FROM products {$whereSql}
+                      ORDER BY created_at DESC, id DESC
+                      LIMIT ? OFFSET ?) page
+               JOIN products p ON p.id = page.id
+              ORDER BY page.created_at DESC, page.id DESC",
             [...$params, $limit, $offset],
         );
         $count = DB::select("SELECT COUNT(*)::int AS total FROM products {$whereSql}", $params);
@@ -101,6 +108,14 @@ class ProductsRepository
         }
 
         return $byId;
+    }
+
+    private static function prefixed(string $alias): string
+    {
+        return implode(', ', array_map(
+            fn (string $column) => $alias.'.'.trim($column),
+            explode(',', self::PRODUCT_COLUMNS),
+        ));
     }
 
     private static function row(object $row): array
