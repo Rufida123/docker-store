@@ -38,7 +38,7 @@ const fmt = (v, digits = 1) => (v === undefined || v === null || Number.isNaN(v)
 
 // Plain-text table of the per-endpoint numbers built in handleSummary.
 export function renderTable(rows) {
-  const header = ['endpoint', 'requests', 'p50 ms', 'p95 ms', 'p99 ms', 'err %', '409 stock', '429', 'avg queries'];
+  const header = ['endpoint', 'requests', 'p50 ms', 'p95 ms', 'p99 ms', 'err %', '409 stock', '429', 'avg queries', 'cache hit %'];
   const lines = rows.map((r) => [
     r.endpoint,
     String(r.requests),
@@ -49,6 +49,7 @@ export function renderTable(rows) {
     String(r.status.stock_409),
     String(r.status.too_many_429),
     fmt(r.avg_queries),
+    r.cache_hit_ratio === null || r.cache_hit_ratio === undefined ? '-' : fmt(r.cache_hit_ratio * 100),
   ]);
   const widths = header.map((h, i) => Math.max(h.length, ...lines.map((l) => l[i].length)));
   const row = (cells) => cells.map((c, i) => (i === 0 ? c.padEnd(widths[i]) : c.padStart(widths[i]))).join('  ');

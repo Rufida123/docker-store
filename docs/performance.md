@@ -526,15 +526,187 @@ Quick checks at 100 req/s, quiet machine (heavy programs closed, AC power),
 | `my_notifications` | 39.6 / 122.5 / 390.2 | 38.0 / 56.2 / 71.4 |
 | `create_order` | 84.4 / 276.9 / 763.5 | 81.2 / 115.1 / 143.3 |
 
-- **The cost of 6.3 is in `my_orders` p50: +6 ms.** One more query and a
-  larger response (about 45–60 item rows per page). That is the price of
-  returning the data the page needs, still far below 20 per-order queries.
+- **`my_orders` p50 +6 ms is more work, not a regression.** Before 6.3 the
+  endpoint returned 20 order headers; now it returns the same 20 orders
+  **plus their items** (about 45–60 item rows per page), which the orders page
+  needs and never had. The extra time is one more query (~0.23 ms of SQL) and
+  a larger JSON response to build and send. The same data fetched the naive
+  way would cost 20 extra queries per page. The two runs therefore don't
+  measure the same response: compare `my_orders` before and after 6.3 as
+  "a bigger answer for +6 ms", not as the same request getting slower.
 - **The p95/p99 difference between the two runs is not caused by 6.3.** The
   first run's tails are high for every endpoint at once, including ones 6.3
   does not touch (`product_detail`, `my_notifications`). That pattern is a
   machine-wide stall (as in the collapse below), not one query. Only the p50
   column can be compared between these two single runs; the back-to-back
   final measurement will settle the tails.
+
+### 6.4 Redis cache for the catalog
+
+**Setup.**
+
+- `redis` service (`redis:7.4-alpine`): no persistence (`--save ""`,
+  `--appendonly no`, the data is disposable), `--maxmemory 256mb`,
+  `--maxmemory-policy volatile-lru`. Under memory pressure Redis evicts only
+  keys that have a TTL, so the catalog version key (no TTL) is never evicted.
+- Backend image: `phpredis` extension, in its own Docker layer after
+  `composer install`, so code changes don't rebuild it.
+- Cache store `catalog` (`config/cache.php`) on its own Redis connection
+  (`config/database.php`, database 2): connect timeout 0.3 s, read timeout
+  0.5 s, **no retries**. Laravel's default Redis connection retries 3 times
+  with backoff, which would add up to ~1 s to every request while Redis is down.
+- `CATALOG_CACHE_STORE` selects the store (`catalog` in Docker, `array` in the
+  tests). The default cache store (`CACHE_STORE=database`, used by the login
+  rate limiter) is unchanged: moving it to Redis would make logins fail with
+  a 500 when Redis is down.
+
+**Where the code is.** All of it stays inside the products module:
+`ProductsCache` (keys, TTLs, locking, failure handling) is used only by
+`ProductsService`. The orders module reports stock changes through the public
+`ProductsModule::stockChanged()`. Cached values are plain arrays and ints
+(rows as the repository returns them), never objects.
+
+#### What we cache, what we don't
+
+| Data | Cached? | Why | TTL | Invalidation |
+|---|---|---|---|---|
+| Product detail row (`GET /products/{id}`, without stock) | **Yes** | The most-read single object; same for every visitor | 10 min fresh, then served stale up to 20 min while refreshed | Deleted after the commit of an update (fields) |
+| Catalog page rows (`GET /products`) | **Yes** | Public, identical for every role; the first pages take most traffic | 2 min fresh, stale up to 10 min | Catalog version `INCR` after the commit of any create or update; the key contains the version |
+| Catalog `COUNT(*)` per category | **Yes** | 10.9 ms full index scan on every list request, only for `pagination.total` | 2 min fresh, stale up to 10 min | Same version key |
+| Display stock per product | **Yes, for display only** | One gRPC `GetStock` per catalog request otherwise | **5 s** | Deleted after AdjustStock, after every reserve and every release |
+| Catalog version | Stored, no TTL | Must never expire, or old page keys would come back | none | Atomic `INCR` (Redis `INCRBY`) |
+| Prices used to create an order (`getOrderLines`) | **Never** | An order must charge the price in the database at that moment, never a cached one | — | — |
+| Stock used to reserve | **Never** | Reservations always call the real `ReserveStock`; the inventory service decides | — | — |
+| Auth, JWT, `/auth/me`, users | **Never** | Security data; a cached role or account would outlive a change | — | — |
+| Orders, order details, notifications | **Never** | Per user and change with every action; caching them would need per-user keys and invalidation on every write, for little reuse | — | — |
+| 404 for an unknown product | No | Rare; caching misses would make a new product id look missing | — | — |
+
+#### Keys
+
+```
+products:item:{id}
+products:list:v{version}:c={category|*}:l={limit}:p={page}
+products:count:v{version}:c={category|*}
+products:stock:{id}
+products:catalog-version
+```
+
+- **Every input that changes the result is in the key**: category, limit (the
+  API's `per_page`) and page. The API has no sort or search parameter (the
+  order is always newest first); a future one must be added to the key.
+- **Normalized:** the key is built from the validated values, not the raw
+  query string. `?page=1`, `?page=01` and no `page` are the same key;
+  `category= Home ` and `category=home` are the same key; unknown parameters
+  (`?utm=x`, cache busters) are ignored and can't fragment the cache.
+- **No role in the key:** the catalog response is the same for customers,
+  admins and anonymous visitors (checked in `listProducts` / `getProduct`).
+  If admins ever get extra fields, the role must go into the key.
+
+#### Invalidation after commit
+
+Writes call `ProductsCache::productChanged()` / `stockChanged()`, which register
+the delete/`INCR` with `DB::afterCommit()`:
+
+- Outside a transaction it runs at once; inside one (product create) it runs
+  only after `COMMIT`, and a rollback discards it.
+- Invalidating *before* the commit would let another request read the old row
+  between the delete and the commit and cache it again, stale until the TTL.
+- While a database transaction is open, `ProductsCache` bypasses Redis
+  entirely (no reads, no writes), so data that might still be rolled back is
+  never cached.
+
+**Product image.** The API has no separate image upload: an image is sent with
+`POST /products`. Creating a product (with or without an image) bumps the
+catalog version after commit, so the new product and its image appear in the
+catalog at once. There is no product delete endpoint.
+
+**Display stock may lag up to 5 s** in two cases: a request that read the old
+stock just before a change and stores it just after the delete (a race), and a
+reserve that timed out and is later released from the outbox (its order was
+never saved, so its products are unknown when the release is delivered). In
+both cases the entry simply expires. Stock shown on the page is informational;
+the reservation is always checked by the inventory service.
+
+#### Stampede protection
+
+Two different moments, two mechanisms:
+
+- **Expiry: `Cache::flexible` (stale-while-revalidate).** After the fresh TTL,
+  requests keep getting the stale value at once, and one deferred refresh
+  (behind Laravel's lock, given a 10 s expiry so a crashed refresher can't hold
+  it forever) recomputes it after the response is sent. Nobody waits and the
+  database sees one query.
+- **Cold miss: a lock (`Cache::lock(...)->block(3)`).** `flexible` alone runs
+  the callback in every request that finds the key missing. That is exactly
+  what happens after an invalidation: a version bump makes every page key new
+  at once. With the lock, one request computes; the others wait (up to 3 s),
+  then read its result. If the wait times out they compute themselves rather
+  than fail.
+
+Why not only one of them: a lock alone makes every request wait at each expiry;
+`flexible` alone lets every request hit the database after each product edit.
+Probabilistic early expiration was not needed: `flexible` already refreshes
+before the value disappears.
+
+#### When Redis is down
+
+Every cache call is wrapped: on the first failure in a request `ProductsCache`
+logs one warning (`catalog cache unavailable, serving from the database`),
+skips Redis for the rest of that request and computes from PostgreSQL. A failed
+invalidation is logged and the entries expire with their TTL. No request fails
+because of the cache; it is only slower.
+
+Tests (`tests/Feature/ProductsCacheTest.php`):
+
+- an edit is visible on the next read (detail and catalog page);
+- a rolled-back edit leaves the cache with the old data and no version bump;
+- equivalent requests share one entry (0 queries), a different page is a new entry;
+- display stock is dropped after a reserve/release and after AdjustStock;
+- a new product appears in the cached catalog at once;
+- Redis down (store pointed at a closed port): the catalog, the detail and an
+  edit all work, served from the database, and a warning is logged.
+
+**Redis down, measured live** (`docker compose stop redis`): every request
+still answers 200 from the database, with one warning in the log per request.
+The first request took 1.34 s (resolving the stopped container's name fails
+slowly, before the 0.3 s connect timeout applies); the next ones ~100 ms
+instead of ~50 ms. If that matters, the next step is a small circuit breaker
+that skips Redis for a few seconds after a failure, shared between requests.
+
+#### Quick check at 100 req/s
+
+Same data as 6.3 (no re-seed), quiet machine, 30 s warm-up, one 2-minute run
+with the query counter off; then a separate 30 s run with
+`PERF_QUERY_LOG=true` for queries per request and the per-endpoint hit ratio
+(2026-11-10).
+
+| Endpoint | After 6.3: p50 / p95 / p99 | After 6.4: p50 / p95 / p99 | Queries / request, 6.3 → 6.4 | Cache hit ratio |
+|---|---|---|---|---|
+| `browse_list` | 52.5 / 76.3 / 102.6 | **15.3** / 65.8 / 84.9 | 2 → **0.2** | 70.7 % |
+| `product_detail` | 38.1 / 57.6 / 76.7 | 41.5 / 59.7 / 73.3 | 1 → 0.9 | 5.5 % |
+| `my_orders` | 44.3 / 62.6 / 83.2 | 42.3 / 59.9 / 76.3 | 3 | not cached |
+| `order_detail` | 42.4 / 61.1 / 83.8 | 40.3 / 57.5 / 70.6 | 3 | not cached |
+| `my_notifications` | 38.0 / 56.2 / 71.4 | 36.6 / 52.4 / 65.7 | 2 | not cached |
+| `create_order` | 81.2 / 115.1 / 143.3 | 80.3 / 111.7 / 132.2 | 8 | not cached |
+
+- **The catalog is 3.4× faster at p50** (52.5 → 15.3 ms) and runs 0.2 queries
+  per request instead of 2: most requests touch neither PostgreSQL nor the
+  inventory service. What remains is Laravel's boot and the Redis round trips.
+- **Product detail did not improve, and that is expected from the test, not
+  the cache.** k6 picks a product uniformly at random among 50 000, so a
+  given product is rarely requested twice within its TTL: 5.5 % hits. Real
+  traffic is skewed toward popular products and would hit far more often. The
+  scenario was not changed, so the comparisons stay valid.
+- **Hit ratio definition:** cache lookups answered from Redis / all lookups,
+  counted by `ProductsCache` (`X-Cache-Hits` / `X-Cache-Misses`). A catalog
+  page makes up to 22 lookups (page, count, 20 display-stock entries), so its
+  ratio is weighted by the 5 s stock entries; the page and count entries hit
+  more often than 70.7 %.
+- **Redis' own counters** during the 2-minute run: 64 867 hits / 45 274
+  misses (58.9 %). That number mixes in Laravel's internal keys (the
+  `flexible` timestamps, lock attempts, the version key) and is shown only as
+  a cross-check.
+- The other endpoints are not cached and stayed within run-to-run variation.
 
 ### Observed behavior
 

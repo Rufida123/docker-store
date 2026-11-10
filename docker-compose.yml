@@ -56,6 +56,10 @@ services:
       INVENTORY_CONNECT_TIMEOUT_MS: 500
       # Load tests only: X-Query-Count / X-Query-Time-Ms headers (docs/performance.md).
       PERF_QUERY_LOG: ${PERF_QUERY_LOG:-false}
+      # Catalog cache (docs/performance.md, 6.4). Without Redis the API keeps
+      # serving from the database, so there is no hard dependency on it.
+      REDIS_HOST: redis
+      CATALOG_CACHE_STORE: ${CATALOG_CACHE_STORE:-catalog}
     ports:
       - "${PORT}:3000"
     volumes:
@@ -76,6 +80,19 @@ services:
     entrypoint: ["php", "artisan", "schedule:work"]
     volumes:
       - ./secrets:/run/secrets:ro
+
+  # Cache for the product catalog. Data is disposable: no volume, and an
+  # eviction policy so it never refuses writes when full.
+  redis:
+    image: redis:7.4-alpine
+    container_name: laravel_redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "volatile-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   inventory_db:
     image: postgres:16-alpine

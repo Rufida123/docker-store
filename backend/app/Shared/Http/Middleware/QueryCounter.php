@@ -2,6 +2,7 @@
 
 namespace App\Shared\Http\Middleware;
 
+use App\Shared\PerfCounters;
 use Closure;
 use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Support\Facades\DB;
@@ -23,6 +24,7 @@ class QueryCounter
         $count = 0;
         $timeMs = 0.0;
         $counting = true;
+        PerfCounters::reset();
 
         DB::listen(function (QueryExecuted $query) use (&$count, &$timeMs, &$counting): void {
             if ($counting) {
@@ -40,6 +42,9 @@ class QueryCounter
 
         $response->headers->set('X-Query-Count', (string) $count);
         $response->headers->set('X-Query-Time-Ms', number_format($timeMs, 2, '.', ''));
+        // Catalog cache lookups answered from the cache / computed (ProductsCache).
+        $response->headers->set('X-Cache-Hits', (string) PerfCounters::get('cache_hit'));
+        $response->headers->set('X-Cache-Misses', (string) PerfCounters::get('cache_miss'));
 
         return $response;
     }

@@ -63,6 +63,9 @@ const STATUS = {
 const realErrors = new Rate('real_errors'); // 5xx, network failures, unexpected 4xx
 const queryCount = new Trend('query_count'); // from X-Query-Count (PERF_QUERY_LOG=true only)
 const queryTime = new Trend('query_time_ms'); // from X-Query-Time-Ms
+// Catalog cache lookups per request, from X-Cache-Hits / X-Cache-Misses (PERF_QUERY_LOG=true only).
+const cacheHits = new Counter('cache_hits');
+const cacheMisses = new Counter('cache_misses');
 
 // Thresholds that always pass: they only make k6 keep per-endpoint sub-metrics,
 // so the summary shows p50/p95/p99 and counts for each endpoint.
@@ -73,6 +76,8 @@ for (const e of ENDPOINTS) {
   thresholds[`real_errors{endpoint:${e}}`] = ['rate>=0'];
   thresholds[`query_count{endpoint:${e}}`] = ['max>=0'];
   thresholds[`query_time_ms{endpoint:${e}}`] = ['max>=0'];
+  thresholds[`cache_hits{endpoint:${e}}`] = ['count>=0'];
+  thresholds[`cache_misses{endpoint:${e}}`] = ['count>=0'];
   for (const counter of Object.values(STATUS)) thresholds[`${counter.name}{endpoint:${e}}`] = ['count>=0'];
 }
 
@@ -116,6 +121,11 @@ function record(res, endpoint) {
   if (qc !== undefined) {
     queryCount.add(Number(qc), tags);
     queryTime.add(Number(res.headers['X-Query-Time-Ms'] || 0), tags);
+  }
+  const ch = res.headers['X-Cache-Hits'];
+  if (ch !== undefined) {
+    cacheHits.add(Number(ch), tags);
+    cacheMisses.add(Number(res.headers['X-Cache-Misses'] || 0), tags);
   }
   return res;
 }
@@ -268,6 +278,11 @@ function endpointRows(data) {
       error_rate: m(`real_errors{endpoint:${e}}`).rate || 0,
       status,
       avg_queries: hasQueries ? q.avg : null,
+      cache_hit_ratio: (() => {
+        const h = m(`cache_hits{endpoint:${e}}`).count || 0;
+        const x = m(`cache_misses{endpoint:${e}}`).count || 0;
+        return h + x > 0 ? h / (h + x) : null;
+      })(),
       avg_query_time_ms: hasQueries ? qt.avg : null,
     };
   });

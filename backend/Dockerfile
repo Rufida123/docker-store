@@ -21,6 +21,9 @@ WORKDIR /app
 COPY backend/composer.json backend/composer.lock ./
 RUN composer install --no-dev --prefer-dist --no-interaction --no-scripts --no-autoloader
 
+# Redis client for the catalog cache (own layer, so code changes don't rebuild it).
+RUN install-php-extensions redis
+
 COPY backend/ ./
 RUN composer dump-autoload --optimize --classmap-authoritative --no-dev --no-scripts
 
