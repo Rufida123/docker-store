@@ -7,3 +7,7 @@ storage/logs
 # Firebase service account and other secrets: never commit them
 secrets/*
 !secrets/README.md
+
+# Load test results (docs/performance.md): keep the folder, not the files
+perf/results/*
+!perf/results/.gitkeep
