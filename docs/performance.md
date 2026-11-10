@@ -865,6 +865,243 @@ What the numbers say:
   range for repeat visits to the first catalog pages, not a prediction for
   real users.
 
+### 6.6 Read replica and read-your-writes
+
+```
+                writes, transactions, sticky reads,
+                reads that must see a recent write
+   backend ───────────────────────────────────────────▶  db (primary)
+      │                                                     │ WAL, streaming
+      │   other reads, when the replica is healthy          ▼
+      └───────────────────────────────────────────────▶  db_replica (hot standby, read-only)
+      │
+      └──▶ redis: ryw:user:{id} = LSN of the user's last write
+                  products:last-write-lsn, db:replica-status (shared, 200 ms), db:replica-down
+```
+
+**Infrastructure** (official `postgres:16-alpine` only, `README.md` → "Read replica"):
+
+- `db` is the primary: `wal_level=replica` (PostgreSQL 16's default),
+  `max_wal_senders=5`, `max_replication_slots=5`, `max_slot_wal_keep_size=1GB`,
+  and `hba_file=/etc/postgresql/pg_hba.conf` mounted from `postgres/pg_hba.conf`
+  (the image's defaults plus one `host replication all all scram-sha-256`
+  line). A mounted hba file works on the existing data volume, where
+  `docker-entrypoint-initdb.d` scripts no longer run.
+- `db_replica` runs `postgres/replica-entrypoint.sh`: on an empty volume it
+  creates the replication role on the primary (`REPLICATION_USER` /
+  `REPLICATION_PASSWORD` from `.env`, never committed), drops a leftover
+  inactive slot, and runs `pg_basebackup -R -X stream -C -S replica_slot`; on
+  every start it runs `postgres` as a hot standby with
+  `recovery_min_apply_delay=$REPLICA_APPLY_DELAY` (0 unless the lag demo is on).
+- The slot keeps WAL for a stopped replica; `max_slot_wal_keep_size=1GB` caps
+  it, so a replica that is down for long cannot fill the primary's disk (the
+  slot is invalidated instead, and the replica is rebuilt: README).
+- Only the Laravel database has a replica; `inventory_db` is unchanged.
+
+**Laravel.** `config/database.php`: when `DB_READ_HOST` is set, the `pgsql`
+connection gets `read.host = db_replica` (2 s connect timeout),
+`write.host = db` and `sticky = true`. `DB_READ_HOST` is empty, so a single
+connection to the primary, for the tests, the scheduler (outbox,
+`inventory:flush-outbox`), `perf-tools` (`perf:seed` reads its own temporary
+tables) and the migrations and seeders (`docker-entrypoint.sh` runs them with
+`DB_READ_HOST=`), so none of them ever reads a lagging replica.
+`OrdersRepository::outboxPending()` also reads with
+`selectFromWriteConnection`.
+
+What Laravel already guarantees (checked in `ReadRouterTest`): every write
+uses the primary; **every read inside a transaction uses the primary**
+(`getReadPdo()` returns the write PDO while `transactions > 0`); and with
+`sticky`, every read after a write **in the same request** uses the primary.
+
+**A bug the replica exposed.** Five writes used `DB::select('INSERT/UPDATE
+... RETURNING ...')` to get the row back. Laravel treats `select()` as a read,
+so with the replica on, the product edit was sent to `db_replica` and failed
+(`read-only transaction`), and those writes did not mark the connection as
+written, so `sticky` did not apply after them. They now go through
+`App\Shared\Database\Sql::returning()` (primary + marks the write), and
+`tests/Architecture/WritesUseThePrimaryTest` fails the build if a write
+statement goes through a read method again. The proof script found it.
+
+#### Routing rules (`App\Shared\Database\ReadRouter`)
+
+Decided lazily, on the first read of a request that Laravel would send to the
+read connection:
+
+| Situation | Reads go to |
+|---|---|
+| Write, transaction, read after a write in the same request | primary (Laravel) |
+| The user wrote recently and the replica has not replayed that write yet (`pg_last_wal_replay_lsn()` < the user's LSN) | primary |
+| The user wrote recently and the replica is past it | replica |
+| No recent write by this user (or anonymous) | replica |
+| Replica lag above `REPLICA_MAX_LAG_SECONDS` (5 s) | primary, one warning |
+| Replica unreachable | primary, one warning; every request skips it for `REPLICA_DOWN_SECONDS` (10 s) |
+| Redis down, or the check fails | primary |
+
+**Read-your-writes: LSN, not a time window.** After every successful write
+(non-GET, 2xx) by a signed-in user, the global middleware `RecordWrites`
+stores the primary's `pg_current_wal_lsn()` under `ryw:user:{id}` (TTL 5 min).
+That user's reads use the replica only once `pg_last_wal_replay_lsn()` on the
+replica has reached that position. Why LSN:
+
+- It is exact: it holds however long the lag is. A time window (e.g. "primary
+  for 5 s after a write") is wrong exactly when it matters, when the replica
+  lags more than the window, and needlessly sends reads to the primary when
+  the replica caught up in milliseconds (the usual case here).
+- The TTL only cleans the key up. If the replica were more than 5 minutes
+  behind, the lag threshold already sends everyone to the primary.
+- It covers every write path without touching the services: create order,
+  status change, cancel, mark notification(s) read, device register and
+  unregister, admin product create, edit and stock.
+
+**The key is stored before the response leaves.** `RecordWrites` does it in
+`handle()`, after the controller and before returning the response, never in
+`terminate()` (which runs after the response is sent). Otherwise a fast client
+could send its next GET before the key exists and read from the replica.
+`RecordWritesTest` checks both: the key exists when `handle()` returns, and the
+class has no `terminate()`.
+
+**The replica position is checked at most every 200 ms, shared.** The router
+keeps `{replay_lsn, lag}` in Redis (`db:replica-status`) and queries the
+replica (one `SELECT` on the connection it opens anyway) only when that entry
+is older than `REPLICA_STATUS_TTL_MS` (200 ms): a handful of status queries per
+second in total, not one per request. Lag counts only while WAL is waiting to
+be replayed (`receive_lsn <> replay_lsn`), so an idle replica has no lag.
+
+**The guarantee's limit.** Read-your-writes covers the user's **own** writes.
+Writes by others reach a user through the replica after the replication lag:
+when an admin changes the status of a customer's order, that customer may see
+the old status until the replica has replayed it (eventual consistency). With
+the measured lag (below) that is a few milliseconds; with the demo delay it
+is 3 s.
+
+#### The Redis cache + replica trap
+
+After a product edit the cache entry is invalidated. If the next request
+refills it from a replica that has not replayed the edit yet, the **old** row
+is cached again, for the whole TTL (10 minutes for a product). Always
+refilling from the primary would avoid it but would send almost every refill
+there (95 % of product-detail lookups are misses in our test). Instead:
+
+1. After the commit of any product write, `ProductsCache` stores the primary's
+   LSN as `products:last-write-lsn` (no TTL).
+2. A refill (cold miss or `flexible`'s background refresh) reads the replica
+   only if the replica has replayed past that LSN; otherwise, or if Redis or
+   the check fails, it reads the primary (`useWriteConnectionWhenReading`).
+   The comparison is against the last product write, so between product edits
+   refills go to the replica as before.
+3. Write-through for the product detail: after an edit, the fresh row is read
+   from the primary and stored in the cache at once (with `flexible`'s
+   timestamp), so there is no hole to refill at all. Catalog pages keep the
+   version-key invalidation, protected by rule 2.
+
+`ProductsCacheReplicaTest` covers it with a replica that is behind: refills
+go to the primary while it is behind the last write, to the replica once it is
+past it; without any product write refills never wait; an edit writes the
+fresh row through and records its LSN.
+
+#### Proof: the user sees what they just wrote
+
+`docs/proofs/replica-read-your-writes.js`, with `REPLICA_APPLY_DELAY=3s`
+(2026-11-10):
+
+```
+Read-your-writes proof against http://localhost:3000; replica recovery_min_apply_delay = 3s
+
+1. Customer creates an order, then reads it back at once
+   PASS  order created  (201, id 1b0208fc-abe3-4159-bb16-35d2c3961182)
+   PASS  GET /orders shows it  (200, 48 ms, reads: primary)
+   PASS  GET /orders/{id} shows it  (200, 47 ms, reads: primary)
+
+2. The same order read directly on the replica, right now
+   PASS  the replica does NOT have it yet (the lag is real)  (count = 0)
+   PASS  after 3500 ms the replica has it  (count = 1)
+
+3. Admin edits a product, then it is read at once
+   PASS  price 20.99 -> 21.99 accepted
+   PASS  GET /products/{id} with the old ETag: 200, not 304  (200, reads: none)
+   PASS  it shows the new price at once  (21.99)
+   PASS  with a new ETag
+   PASS  while the replica itself still has the old price  (replica: 20.99)
+
+ALL CHECKS PASSED (10 checks)
+```
+
+`reads: none` in step 3: the product came from Redis, written through after
+the edit; neither database was read. (`reads:` is the `X-DB-Read` header,
+present when `PERF_QUERY_LOG=true`.)
+
+**Replica stopped, measured live:** every request answered 200 from the
+primary. The first took 1.5 s (resolving the stopped container's name fails
+slowly), the next ones ~40 ms, because the 10 s "replica down" key makes every
+request skip it.
+
+#### Quick check at 100 req/s
+
+Back to back on the same data and machine state (2026-11-10), each after a
+30 s warm-up: **A** without the replica (`DB_READ_HOST=`, every read on the
+primary) and **B** with it; then **C**, 30 s with `PERF_QUERY_LOG=true` for the
+routing counters. `pg_stat_replication.replay_lag` sampled every 5 s during B.
+
+| Endpoint | A: no replica, p50 / p95 / p99 | B: replica, p50 / p95 / p99 |
+|---|---|---|
+| `browse_list` | 14.9 / 64.8 / 88.5 | 14.7 / 62.4 / 81.2 |
+| `product_detail` | 39.8 / 59.2 / 96.2 | 41.3 / 62.0 / 101.2 |
+| `my_orders` | 39.5 / 58.6 / 92.5 | 42.5 / 64.2 / 101.9 |
+| `order_detail` | 38.3 / 56.6 / 92.8 | 41.3 / 62.3 / 100.1 |
+| `my_notifications` | 34.7 / 51.7 / 87.0 | 37.7 / 57.6 / 90.9 |
+| `create_order` | 76.1 / 109.0 / 164.0 | **96.0 / 133.4 / 180.8** |
+
+0 errors and 0 dropped iterations in both.
+
+**Replication lag during B:** median **2.2 ms**, min 1.8 ms, max 14.8 ms
+(24 samples). That is the window of eventual consistency for other users'
+writes.
+
+**Routing (C):**
+
+| Endpoint | Reads on replica / primary | Routing decision, avg / p95 | Replica connect, avg | Cache refills replica / primary |
+|---|---|---|---|---|
+| `browse_list` | 79 / 0 | 0.05 / 0.51 ms | 13.4 ms | 79 / 0 |
+| `product_detail` | 632 / 0 | 0.45 / 0.78 ms | 12.9 ms | 632 / 0 |
+| `my_orders` | 450 / 1 | 2.93 / 6.18 ms | 13.6 ms | — |
+| `order_detail` | 361 / 0 | 2.84 / 5.83 ms | 13.4 ms | — |
+| `my_notifications` | 391 / 0 | 3.12 / 6.02 ms | 13.2 ms | — |
+| `create_order` | 149 / 1 | 2.96 / 5.78 ms | 14.7 ms | — |
+
+(Requests answered entirely from Redis read no database and are not counted;
+that is why `browse_list` shows only 79.)
+
+What the numbers say, honestly:
+
+- **The replica does not make anything faster here, and `create_order` got
+  ~20 ms slower.** Every read endpoint is within a few ms of A (slightly
+  worse). `create_order` now reads the products first, so its first read opens
+  a connection to the replica (~13 ms, scram auth), and then the write opens a
+  second connection to the primary. Without a replica it opens one. Same cause
+  for a smaller share of the read endpoints: the replica connection costs what
+  the primary connection cost, so nothing is saved per request.
+- **The routing decision itself is cheap:** 0.05–0.45 ms for anonymous
+  requests (two Redis lookups, the replica position from the shared 200 ms
+  entry), ~3 ms for signed-in requests (one more lookup for the user's write
+  key, and they more often refresh the shared position). The replica
+  connection (~13 ms) is the real per-request cost, and it is the same as the
+  primary connection it replaces.
+- **Almost every read went to the replica** (1 862 of 1 864 requests); the 2
+  on the primary are reads right after the same user's write that the replica
+  had not replayed yet: read-your-writes at work. All 711 cache refills read
+  the replica: no product was edited during the run, so the last-write check
+  never had to send them to the primary.
+- **Why no gain on this machine:** both databases run on the same 12 CPUs and
+  the same disk, so moving reads to the replica only moves the load, it does
+  not add capacity. The primary was not the bottleneck either (section 5: the
+  time per request is mostly Laravel's boot and connection setup, and most
+  catalog reads now never reach a database at all, thanks to Redis).
+- **When a replica does help:** on separate hardware, when the primary is
+  saturated by reads (CPU or I/O), to keep heavy reads (reports, exports,
+  analytics) off the primary, and for availability (a standby ready to be
+  promoted). Here it is in place and correct (read-your-writes, the cache
+  trap, the fallbacks); its gain needs a second machine to show.
+
 ### Observed behavior
 
 **Collapse at 120 req/s: queueing close to capacity (2026-11-10).**

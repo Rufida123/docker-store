@@ -45,6 +45,20 @@ class QueryCounter
         // Catalog cache lookups answered from the cache / computed (ProductsCache).
         $response->headers->set('X-Cache-Hits', (string) PerfCounters::get('cache_hit'));
         $response->headers->set('X-Cache-Misses', (string) PerfCounters::get('cache_miss'));
+        // Read routing (ReadRouter): where this request's reads went, what the
+        // decision cost, and where cache refills read from.
+        // "primary" also covers reads Laravel keeps on the primary by itself
+        // (writes, transactions, sticky) and refills forced there; "none" means
+        // no query at all (answered from the cache).
+        $response->headers->set('X-DB-Read', match (true) {
+            PerfCounters::get('db_read_replica') > 0 => 'replica',
+            $count > 0 => 'primary',
+            default => 'none',
+        });
+        $response->headers->set('X-Route-Us', (string) PerfCounters::get('route_us'));
+        $response->headers->set('X-Replica-Connect-Us', (string) PerfCounters::get('replica_connect_us'));
+        $response->headers->set('X-Refill-Replica', (string) PerfCounters::get('refill_replica'));
+        $response->headers->set('X-Refill-Primary', (string) PerfCounters::get('refill_primary'));
 
         return $response;
     }

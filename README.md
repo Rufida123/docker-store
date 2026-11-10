@@ -107,6 +107,55 @@ regenerate them with protoc (https://github.com/protocolbuffers/protobuf/release
 Load tests and the baseline numbers (dataset seeder, k6 scenarios, results and
 the problems to fix next) are in [`docs/performance.md`](docs/performance.md).
 
+### Read replica
+
+`db_replica` is a read-only hot standby of `db` (PostgreSQL streaming
+replication), built with the official image only. The API sends reads to it
+when that is safe and everything else to `db` (`docs/performance.md`, 6.6).
+The API never depends on it: with the replica stopped, every read uses `db`.
+
+**First start.** Add the replication login to `.env` (any values; see
+`.env.example`), then start everything as usual:
+
+    REPLICATION_USER=replicator
+    REPLICATION_PASSWORD=<a long random value>
+
+On its first start `db_replica` creates that role on `db` and copies the
+primary with `pg_basebackup` (a few seconds on the perf dataset). Check it:
+
+    docker compose exec db psql -U <POSTGRES_USER> -d <POSTGRES_DB> -c "select client_addr, state, replay_lag from pg_stat_replication"
+
+`state` must be `streaming`.
+
+**Demo: artificial lag.** `REPLICA_APPLY_DELAY` delays replay on the replica
+(`recovery_min_apply_delay`), to show that users still see their own writes:
+
+    $env:REPLICA_APPLY_DELAY="3s"; docker compose up -d db_replica       # on
+    Remove-Item Env:REPLICA_APPLY_DELAY; docker compose up -d db_replica # off (0)
+    node docs/proofs/replica-read-your-writes.js
+
+**Run without the replica.** `DB_READ_HOST=` (empty) gives the backend a single
+connection to `db`:
+
+    $env:DB_READ_HOST=""; docker compose up -d backend
+
+**Reset the replica** (to rebuild it from scratch, e.g. after its slot was
+invalidated, see below):
+
+    docker compose rm -sf db_replica
+    docker volume rm docker-store_replica_pgdata_laravel
+    docker compose up -d db_replica
+
+**Replication slot and disk space.** The replica uses a replication slot
+(`replica_slot`), so `db` keeps the WAL the replica has not received yet: a
+replica that is stopped for a while catches up when it comes back. The cost is
+that a stopped replica makes `db` keep WAL on disk. `db` runs with
+`max_slot_wal_keep_size=1GB`: beyond that the slot is invalidated
+(`wal_status = lost` in `pg_replication_slots`), `db` frees the WAL, and the
+replica can no longer catch up. Then reset it as above. Its first start also
+drops a leftover inactive slot. Migrations, seeders, the scheduler and
+`perf:seed` always run on `db`.
+
 ## Endpoints
 
 Every URL is versioned under `/api/v1` (except `/health`, `/api-docs` and `/uploads`).

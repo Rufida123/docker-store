@@ -72,6 +72,13 @@ const queryTime = new Trend('query_time_ms'); // from X-Query-Time-Ms
 // Catalog cache lookups per request, from X-Cache-Hits / X-Cache-Misses (PERF_QUERY_LOG=true only).
 const cacheHits = new Counter('cache_hits');
 const cacheMisses = new Counter('cache_misses');
+// Read routing (X-DB-Read, X-Route-Us, X-Replica-Connect-Us, X-Refill-*; PERF_QUERY_LOG=true only).
+const readsReplica = new Counter('reads_replica');
+const readsPrimary = new Counter('reads_primary');
+const routeUs = new Trend('route_us');
+const replicaConnectUs = new Trend('replica_connect_us');
+const refillReplica = new Counter('refill_replica');
+const refillPrimary = new Counter('refill_primary');
 
 // Thresholds that always pass: they only make k6 keep per-endpoint sub-metrics,
 // so the summary shows p50/p95/p99 and counts for each endpoint.
@@ -87,6 +94,9 @@ for (const e of ENDPOINTS) {
   thresholds[`query_time_ms{endpoint:${e}}`] = ['max>=0'];
   thresholds[`cache_hits{endpoint:${e}}`] = ['count>=0'];
   thresholds[`cache_misses{endpoint:${e}}`] = ['count>=0'];
+  for (const n of ['reads_replica', 'reads_primary', 'refill_replica', 'refill_primary']) thresholds[`${n}{endpoint:${e}}`] = ['count>=0'];
+  thresholds[`route_us{endpoint:${e}}`] = ['max>=0'];
+  thresholds[`replica_connect_us{endpoint:${e}}`] = ['max>=0'];
   for (const counter of Object.values(STATUS)) thresholds[`${counter.name}{endpoint:${e}}`] = ['count>=0'];
 }
 
@@ -138,6 +148,15 @@ function record(res, endpoint) {
   if (ch !== undefined) {
     cacheHits.add(Number(ch), tags);
     cacheMisses.add(Number(res.headers['X-Cache-Misses'] || 0), tags);
+  }
+  const read = res.headers['X-Db-Read'];
+  if (read !== undefined) {
+    if (read === 'replica') readsReplica.add(1, tags);
+    if (read === 'primary') readsPrimary.add(1, tags);
+    routeUs.add(Number(res.headers['X-Route-Us'] || 0), tags);
+    if (read === 'replica') replicaConnectUs.add(Number(res.headers['X-Replica-Connect-Us'] || 0), tags);
+    refillReplica.add(Number(res.headers['X-Refill-Replica'] || 0), tags);
+    refillPrimary.add(Number(res.headers['X-Refill-Primary'] || 0), tags);
   }
   return res;
 }
@@ -307,6 +326,15 @@ function endpointRows(data) {
       latency_200: (({ med, 'p(95)': p95, 'p(99)': p99 }) => ({ p50: med, p95, p99 }))(m(`duration_200{endpoint:${e}}`)),
       latency_304: (({ med, 'p(95)': p95, 'p(99)': p99 }) => ({ p50: med, p95, p99 }))(m(`duration_304{endpoint:${e}}`)),
       bytes_received: m(`data_received{endpoint:${e}}`).count || 0,
+      routing: {
+        reads_replica: m(`reads_replica{endpoint:${e}}`).count || 0,
+        reads_primary: m(`reads_primary{endpoint:${e}}`).count || 0,
+        route_us_avg: m(`route_us{endpoint:${e}}`).avg,
+        route_us_p95: m(`route_us{endpoint:${e}}`)['p(95)'],
+        replica_connect_us_avg: m(`replica_connect_us{endpoint:${e}}`).avg,
+        refill_replica: m(`refill_replica{endpoint:${e}}`).count || 0,
+        refill_primary: m(`refill_primary{endpoint:${e}}`).count || 0,
+      },
     };
   });
 }
@@ -345,6 +373,11 @@ export function handleSummary(data) {
       return `  ${r.endpoint.padEnd(16)} 200: ${t(r.latency_200)}   304: ${r.not_modified_ratio ? t(r.latency_304) : '-'}   (304 = ${(r.not_modified_ratio * 100).toFixed(1)} %, received ${(r.bytes_received / 1048576).toFixed(2)} MiB)`;
     }),
     `data_received: ${(received / 1048576).toFixed(1)} MiB in total (setup included)`,
+    ...(rows.some((r) => r.routing.reads_replica + r.routing.reads_primary > 0)
+      ? ['', 'Read routing (requests whose reads went to replica / primary; routing cost; cache refills replica / primary):',
+        ...rows.map((r) => { const g = r.routing; const f = (x) => (x === undefined || x === null ? '-' : (x / 1000).toFixed(2));
+          return `  ${r.endpoint.padEnd(16)} replica ${String(g.reads_replica).padStart(5)}  primary ${String(g.reads_primary).padStart(5)}  route avg ${f(g.route_us_avg)} ms p95 ${f(g.route_us_p95)} ms  replica connect avg ${f(g.replica_connect_us_avg)} ms  refills ${g.refill_replica}/${g.refill_primary}`; })]
+      : []),
     '',
     `Result written to ${file}`,
     '',

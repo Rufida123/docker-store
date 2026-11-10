@@ -27,6 +27,7 @@
         <env name="BROADCAST_CONNECTION" value="null"/>
         <env name="CACHE_STORE" value="array"/>
         <env name="CATALOG_CACHE_STORE" value="array"/>
+        <env name="ROUTING_CACHE_STORE" value="array"/>
         <!-- Tests always run on their own database; the connection details
              (host, user, password) come from the gitignored .env.testing.
              Tests\TestCase refuses to run unless the name ends with _test. -->

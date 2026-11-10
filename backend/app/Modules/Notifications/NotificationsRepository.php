@@ -2,6 +2,7 @@
 
 namespace App\Modules\Notifications;
 
+use App\Shared\Database\Sql;
 use App\Shared\Time;
 use Illuminate\Support\Facades\DB;
 
@@ -17,7 +18,7 @@ class NotificationsRepository
      */
     public function insert(array $notification): ?array
     {
-        $rows = DB::select(
+        $rows = Sql::returning(
             'INSERT INTO notifications (user_id, order_id, type, status, title, message, metadata)
              VALUES (?, ?, ?, ?, ?, ?, ?::jsonb)
              ON CONFLICT (order_id, type, status) DO NOTHING
@@ -105,7 +106,7 @@ class NotificationsRepository
 
     public function markRead(string $id, string $userId): ?array
     {
-        $rows = DB::select(
+        $rows = Sql::returning(
             'UPDATE notifications
                 SET is_read = TRUE, read_at = COALESCE(read_at, NOW())
               WHERE id = ? AND user_id = ?
