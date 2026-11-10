@@ -7,7 +7,7 @@ current code, and step 2 will be measured against them with the same data and
 the same request rate.
 
 Contents: [dataset](#1-dataset) · [running the load test](#2-load-test) ·
-[environment](#3-environment) · [baseline](#4-baseline-results) · [capacity](#41-capacity-stepped-load) ·
+[environment](#3-environment) · [baseline](#4-baseline-results) · [capacity](#41-capacity-stepped-load) · [120 req/s](#42-baseline-at-120-reqs-high-load) ·
 [observed problems](#5-observed-problems-to-fix-in-step-2)
 
 ## 1. Dataset
@@ -275,8 +275,40 @@ What it shows:
 
 **Rates to use for before/after comparisons:** **40 req/s** (normal load, the
 baseline table above) and **120 req/s** (about 70 % of the ceiling, where
-per-request costs start to queue). Report also the ceiling itself (served
-req/s at 240) after each optimization.
+per-request costs start to queue, table 4.2). Report also the ceiling itself
+(served req/s at 240) after each optimization.
+
+### 4.2 Baseline at 120 req/s (high load)
+
+Same procedure as the 40 req/s baseline: fresh `perf:seed` / `seed:perf`, one
+warm-up run, then three 2-minute runs at 120 req/s, query counter off
+(2026-11-10). Median of the three runs; the range (lowest–highest run) is in
+brackets for the tail percentiles.
+
+```powershell
+docker compose --profile perf run --rm -e RATE=120 -e LABEL=baseline120-1 k6
+```
+
+| Endpoint | Requests | p50 | p95 | p99 | Error rate |
+|---|---|---|---|---|---|
+| `browse_list` — `GET /products` | 4 321 | 50.9 | 133.2 (100.5–138.5) | 294.3 (128.4–430.8) | 0 % |
+| `product_detail` — `GET /products/{id}` | 3 601 | 35.6 | 79.4 (49.6–82.4) | 200.5 (70.1–312.2) | 0 % |
+| `my_orders` — `GET /orders` | 2 161 | 34.4 | 73.5 (46.8–76.8) | 192.8 (63.4–297.4) | 0 % |
+| `order_detail` — `GET /orders/{id}` | 1 681 | 39.9 | 80.6 (53.7–83.7) | 194.8 (70.5–324.3) | 0 % |
+| `my_notifications` — `GET /notifications` | 1 921 | 35.1 | 68.9 (48.4–76.9) | 190.8 (61.1–321.5) | 0 % |
+| `create_order` — `POST /orders` | 721 | 72.6 | 136.4 (95.1–143.7) | 369.9 (127.1–505.0) | 0 % |
+
+- All runs: 0 errors, 0 × 409 stock, 0 × 429, 0 dropped iterations.
+- **p50 is stable** (within ±3 ms between runs) and even a little lower than at
+  40 req/s: with more traffic the CPUs stay at a higher clock.
+- **p95 and above are noisy at this load.** One run of the three (run 2) had
+  p99 2–4× lower than the other two. Close to the ceiling, short stalls on the
+  machine (laptop CPU boost/throttling, WSL2 scheduling, k6 on the same
+  machine) turn into queues. Compare p50 and p95 first; treat a p99 change as
+  real only if it is clearly outside the ranges above, or measure 5 runs.
+- **The warm-up matters more here:** the warm-up run right after seeding had a
+  p95 2× higher (e.g. `browse_list` 288.5 ms, `create_order` 370.4 ms) than the
+  measured runs. Always discard it.
 
 ## 5. Observed problems to fix in step 2
 
