@@ -7,7 +7,7 @@ current code, and step 2 will be measured against them with the same data and
 the same request rate.
 
 Contents: [dataset](#1-dataset) · [running the load test](#2-load-test) ·
-[environment](#3-environment) · [baseline](#4-baseline-results) ·
+[environment](#3-environment) · [baseline](#4-baseline-results) · [capacity](#41-capacity-stepped-load) ·
 [observed problems](#5-observed-problems-to-fix-in-step-2)
 
 ## 1. Dataset
@@ -226,12 +226,57 @@ from the separate `querycount` run.
 - "DB time" is what Laravel measures around each query. It includes opening the
   database connection on the request's first query (see problem 1), which is
   why a single primary-key lookup shows 24 ms.
-- 40 req/s does not saturate the machine. Before step 2, consider a stepped run
-  (e.g. `RATE=80`, `RATE=160`) to find where latency starts to climb, and use
-  that rate for before/after as well.
+- 40 req/s does not saturate the machine; see [4.1](#41-capacity-stepped-load)
+  for where it breaks.
 
 Raw results: `perf/results/warmup-*.json`, `baseline-{1,2,3}-*.json`,
 `querycount-*.json` (local only, not committed).
+
+### 4.1 Capacity (stepped load)
+
+Same scenarios and mix, one run per rate, 90 s each, after a fresh
+`perf:seed` / `seed:perf`, query counter off (2026-11-10). CPU is a
+`docker stats` sample about 45 s into each run (100 % = one core; Docker has 12).
+
+```powershell
+foreach ($r in 40,80,160,240,320) {
+  docker compose --profile perf run --rm -e RATE=$r -e DURATION=90s -e LABEL=step-$r k6
+}
+```
+
+| Target req/s | Served req/s | Dropped | p50 (range over endpoints) | p95 | p99 | Errors | CPU backend / db / k6 |
+|---|---|---|---|---|---|---|---|
+| 40 | 40 | 0 | 28–70 ms | 62–105 ms | 76–112 ms | 0 | 85 % / 73 % / 6 % |
+| 80 | 80 | 0 | 22–57 ms | 51–98 ms | 68–102 ms | 0 | 146 % / 136 % / 11 % |
+| 160 | 160 | 0 | 44–90 ms | 176–315 ms | 345–542 ms | 0 | 473 % / 529 % / 23 % |
+| 240 | **165** | 6 714 | 13.7–16.8 **s** | 32 s | 32–33 s | 0 | 319 % / 466 % / 366 % |
+| 320 | **113** | 17 902 | 19.5–22.2 **s** | 61–63 s | 65–66 s | 5–7 % | 453 % / 281 % / 135 % |
+
+Per-endpoint numbers are in `perf/results/step-*.json`. At every rate,
+`create_order` is the slowest endpoint and `browse_list` the slowest read.
+
+What it shows:
+
+- **Up to 80 req/s the system is comfortable.** Latency is even slightly lower
+  than at 40 req/s (warmer caches, busier CPUs).
+- **160 req/s is the edge.** Everything is still served with no errors, but p95
+  is 2–3× higher and p99 reaches 0.35–0.54 s. The backend and PostgreSQL each
+  use about 5 cores.
+- **The ceiling is about 165 req/s.** At 240 req/s the system still completes
+  only ~165 req/s; the rest queue up, and latency jumps from tenths of a second
+  to 14–32 s (no errors, just waiting).
+- **At 320 req/s it breaks down.** Throughput *drops* to ~113 req/s.
+  101 requests hit PHP's 30 s `max_execution_time` (500), 429 hit k6's 60 s
+  request timeout, and ~2 700 were still waiting when the run ended.
+- **Above 160 req/s these numbers also measure k6.** k6 runs on the same
+  machine: with requests piling up it opened ~3 800 VUs and used up to 3.7
+  cores and 6 GB of RAM, competing with the system under test. The ceiling
+  (~165 req/s) is reliable; the exact latencies at 240 and 320 are not.
+
+**Rates to use for before/after comparisons:** **40 req/s** (normal load, the
+baseline table above) and **120 req/s** (about 70 % of the ceiling, where
+per-request costs start to queue). Report also the ceiling itself (served
+req/s at 240) after each optimization.
 
 ## 5. Observed problems to fix in step 2
 
