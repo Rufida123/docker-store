@@ -27,6 +27,13 @@ return [
         'query_log' => filter_var(env('PERF_QUERY_LOG', false), FILTER_VALIDATE_BOOLEAN),
     ],
 
+    // Catalog cache (docs/performance.md, 6.4). 'catalog' is a Redis store
+    // with short timeouts; tests use 'array'. When the store fails, the
+    // products module logs a warning and reads from the database.
+    'catalog_cache' => [
+        'store' => env('CATALOG_CACHE_STORE', 'catalog'),
+    ],
+
     'firebase' => [
         'service_account_file' => env('FIREBASE_SERVICE_ACCOUNT_FILE', ''),
     ],

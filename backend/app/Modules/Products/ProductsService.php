@@ -28,6 +28,7 @@ class ProductsService
     public function __construct(
         private ProductsRepository $repo,
         private InventoryModule $inventory,
+        private ProductsCache $cache,
     ) {
     }
 
@@ -187,7 +188,10 @@ class ProductsService
         }
 
         try {
-            return ['levels' => $this->inventory->getStock($productIds), 'status' => 'available'];
+            // Display only, cached a few seconds (ProductsCache::stock).
+            $levels = $this->cache->stock($productIds, fn (array $missing) => $this->inventory->getStock($missing));
+
+            return ['levels' => $levels, 'status' => 'available'];
         } catch (InventoryUnavailable|InventoryTimeout|InventoryError) {
             return ['levels' => [], 'status' => 'unavailable'];
         }
@@ -244,6 +248,10 @@ class ProductsService
                     $available = $this->inventory->adjust($product['id'], $stock)['available'];
                 }
 
+                // Runs after the commit (new product, possibly with an image);
+                // a rolled-back create invalidates nothing.
+                $this->cache->productChanged($product['id']);
+
                 return self::withStock($product, $available, 'available');
             });
         } catch (Throwable $e) {
@@ -270,7 +278,16 @@ class ProductsService
             $category = mb_strtolower(Text::trim($raw));
         }
 
-        ['rows' => $rows, 'total' => $total] = $this->repo->list($category, $pagination['limit'], $pagination['offset']);
+        // Cached by (category, limit, page) after normalization: "?page=1",
+        // "?page=01" and no page share one key. The catalog is public and the
+        // same for every role, so the key has no role part.
+        $rows = $this->cache->page(
+            $category,
+            $pagination['limit'],
+            $pagination['page'],
+            fn () => $this->repo->listPage($category, $pagination['limit'], $pagination['offset']),
+        );
+        $total = $this->cache->count($category, fn () => $this->repo->count($category));
 
         $stock = $this->stockLevels(array_column($rows, 'id'));
         $rows = array_map(
@@ -292,7 +309,8 @@ class ProductsService
     {
         self::checkProductId($id);
 
-        $product = $this->repo->findById(mb_strtolower($id));
+        $productId = mb_strtolower($id);
+        $product = $this->cache->product($productId, fn () => $this->repo->findById($productId));
         if ($product === null) {
             throw new AppError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
         }
@@ -329,6 +347,7 @@ class ProductsService
         if ($product === null) {
             throw new AppError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
         }
+        $this->cache->productChanged($product['id']); // after commit
 
         $stock = $this->stockLevels([$product['id']]);
 
@@ -366,6 +385,8 @@ class ProductsService
             throw self::inventoryFailure($e);
         }
 
+        $this->cache->stockChanged([$product['id']]);
+
         if ($result['status'] === 'refused') {
             throw new AppError(409, 'INSUFFICIENT_STOCK', 'Stock cannot go below zero', [
                 ['field' => 'change', 'available' => $result['available'], 'message' => "Only {$result['available']} in stock"],
@@ -373,6 +394,17 @@ class ProductsService
         }
 
         return self::withStock($product, $result['available'], 'available');
+    }
+
+    /**
+     * The inventory reserved or released stock of these products (orders
+     * module, through ProductsModule): drop their cached display stock.
+     *
+     * @param list<string> $productIds
+     */
+    public function stockChanged(array $productIds): void
+    {
+        $this->cache->stockChanged(array_values(array_unique($productIds)));
     }
 
     /**

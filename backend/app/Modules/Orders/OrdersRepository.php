@@ -94,6 +94,39 @@ class OrdersRepository
         return array_map(fn (object $row) => (array) $row, $rows);
     }
 
+    /**
+     * The items of several orders in ONE query (a list page), never one query
+     * per order.
+     *
+     * @param list<string> $orderIds
+     * @return array<string, list<array>> order id => its items, [] for none
+     */
+    public function findItemsForOrders(array $orderIds): array
+    {
+        if ($orderIds === []) {
+            return [];
+        }
+
+        $rows = DB::select(
+            'SELECT order_id, product_id, product_name, unit_price, quantity,
+                    unit_price * quantity AS line_total
+               FROM order_items
+              WHERE order_id = ANY(?::uuid[])
+              ORDER BY order_id, product_name',
+            ['{'.implode(',', $orderIds).'}'],
+        );
+
+        $byOrder = array_fill_keys($orderIds, []);
+        foreach ($rows as $row) {
+            $item = (array) $row;
+            $orderId = $item['order_id'];
+            unset($item['order_id']);
+            $byOrder[$orderId][] = $item;
+        }
+
+        return $byOrder;
+    }
+
     public function findHistory(string $orderId): array
     {
         $rows = DB::select(

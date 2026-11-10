@@ -34,28 +34,42 @@ class ProductsRepository
     }
 
     /**
-     * One page of products (newest first) plus the total count. category is optional.
+     * One page of products (newest first). category is optional. The count
+     * is a separate method so the cache can share one count between pages.
      *
-     * @return array{rows: array, total: int}
+     * @return list<array>
      */
-    public function list(?string $category, int $limit, int $offset): array
+    public function listPage(?string $category, int $limit, int $offset): array
     {
-        $params = [];
-        $whereSql = '';
-        if ($category !== null) {
-            $params[] = $category;
-            $whereSql = 'WHERE category = ?';
-        }
+        [$whereSql, $params] = self::categoryFilter($category);
 
+        // Deferred join: the page's ids come from an index-only scan of
+        // (category,) created_at, id, and only those 20 rows are read from
+        // the table. A plain LIMIT/OFFSET read every skipped row in full
+        // (deep page: 28 ms -> 10 ms, docs/performance.md).
         $page = DB::select(
-            'SELECT '.self::PRODUCT_COLUMNS." FROM products {$whereSql}
-              ORDER BY created_at DESC, id DESC
-              LIMIT ? OFFSET ?",
+            'SELECT '.self::prefixed('p')."
+               FROM (SELECT id, created_at FROM products {$whereSql}
+                      ORDER BY created_at DESC, id DESC
+                      LIMIT ? OFFSET ?) page
+               JOIN products p ON p.id = page.id
+              ORDER BY page.created_at DESC, page.id DESC",
             [...$params, $limit, $offset],
         );
-        $count = DB::select("SELECT COUNT(*)::int AS total FROM products {$whereSql}", $params);
+        return array_map(self::row(...), $page);
+    }
 
-        return ['rows' => array_map(self::row(...), $page), 'total' => $count[0]->total];
+    public function count(?string $category): int
+    {
+        [$whereSql, $params] = self::categoryFilter($category);
+
+        return DB::select("SELECT COUNT(*)::int AS total FROM products {$whereSql}", $params)[0]->total;
+    }
+
+    /** @return array{string, list<string>} */
+    private static function categoryFilter(?string $category): array
+    {
+        return $category === null ? ['', []] : ['WHERE category = ?', [$category]];
     }
 
     /**
@@ -101,6 +115,14 @@ class ProductsRepository
         }
 
         return $byId;
+    }
+
+    private static function prefixed(string $alias): string
+    {
+        return implode(', ', array_map(
+            fn (string $column) => $alias.'.'.trim($column),
+            explode(',', self::PRODUCT_COLUMNS),
+        ));
     }
 
     private static function row(object $row): array

@@ -23,4 +23,16 @@ class ProductsModule
     {
         return $this->service->getOrderLines($items);
     }
+
+    /**
+     * The inventory reserved or released stock of these products: their
+     * cached display stock is dropped (after commit), so product pages show
+     * the new quantity on the next read instead of after the cache TTL.
+     *
+     * @param list<string> $productIds
+     */
+    public function stockChanged(array $productIds): void
+    {
+        $this->service->stockChanged($productIds);
+    }
 }

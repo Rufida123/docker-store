@@ -166,6 +166,20 @@ return [
             'backoff_cap' => env('REDIS_BACKOFF_CAP', 1000),
         ],
 
+        // Catalog cache (config/cache.php 'catalog'): fail fast when Redis
+        // is down instead of retrying, the database is the fallback.
+        'catalog' => [
+            'url' => env('REDIS_URL'),
+            'host' => env('REDIS_HOST', '127.0.0.1'),
+            'username' => env('REDIS_USERNAME'),
+            'password' => env('REDIS_PASSWORD'),
+            'port' => env('REDIS_PORT', '6379'),
+            'database' => env('REDIS_CATALOG_DB', '2'),
+            'timeout' => (float) env('REDIS_CATALOG_TIMEOUT', 0.3),
+            'read_timeout' => (float) env('REDIS_CATALOG_READ_TIMEOUT', 0.5),
+            'max_retries' => 0,
+        ],
+
         'cache' => [
             'url' => env('REDIS_URL'),
             'host' => env('REDIS_HOST', '127.0.0.1'),
