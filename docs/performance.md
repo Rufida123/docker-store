@@ -1102,6 +1102,130 @@ What the numbers say, honestly:
   promoted). Here it is in place and correct (read-your-writes, the cache
   trap, the fallbacks); its gain needs a second machine to show.
 
+### 6.7 Final comparison: before vs after, back to back
+
+**Method.** One session on 2026-11-11, quiet machine, AC power. Both sides run
+the same k6 script (a revalidating client: it sends `If-None-Match`; the old
+code ignores it and always answers 200) at the same rates, on freshly seeded
+data with an empty Redis:
+
+- **Before:** a backend image built from the baseline commit `833dc94` (in a
+  separate git worktree), with the 6.1 index migration rolled back, so the
+  old code ran on its old indexes.
+- **After:** the current code (6.1–6.6: indexes, deferred join, items in the
+  list, Redis, ETag/304, read replica with read-your-writes).
+
+Per side and rate: 2 min warm-up (not counted), then 3 runs of 2 min; the
+values are the median of the 3 runs, with the lowest–highest run in brackets
+where it matters. Images of the outputs are in
+`docs/proofs/screenshots/perf/`.
+
+The first attempt of the "before" runs at 40 req/s is not used: the laptop
+went to sleep during run 1 (79 % network errors, 1 074 dropped iterations).
+All three were redone in the same session, from a fresh seed, after the other
+sets; the discarded results are kept in `perf/results/discarded-sleep/`.
+
+#### 120 req/s (about 70 % of the measured ceiling)
+
+| Endpoint | Before p50 / p95 / p99 | After p50 / p95 / p99 | p50 | p95 |
+|---|---|---|---|---|
+| `GET /products` | 110.7 / 2207.0 / 2647.6 | **17.4 / 63.4 / 106.9** | −84 % | −97 % |
+| `GET /products/{id}` | 66.2 / 2129.8 / 2445.2 | 44.9 / 83.1 / 146.0 | −32 % | −96 % |
+| `GET /orders` | 61.5 / 2129.5 / 2441.9 | 48.3 / 85.0 / 143.6 | −21 % | −96 % |
+| `GET /orders/{id}` | 68.4 / 2086.8 / 2503.9 | 47.5 / 79.4 / 147.2 | −31 % | −96 % |
+| `GET /notifications` | 62.7 / 2146.6 / 2475.3 | 42.7 / 73.4 / 136.5 | −32 % | −97 % |
+| `POST /orders` | 132.3 / 2253.9 / 2703.6 | 106.7 / 165.3 / 263.2 | −19 % | −93 % |
+
+- Dropped iterations: before up to 103 per run, after 0. Errors: 0 on both sides.
+- `browse_list`: 60 % of requests answered with 304; catalog bytes received
+  37.1 → 17.2 MiB per run.
+- p95 ranges over the 3 runs: before 109–2 755 ms (`browse_list` 203–2 755),
+  after 60–92 ms. **Two of the three "before" runs fell into the queue**
+  described in "Observed behavior" (p95 above 2 s); the third stayed just
+  below it. Even against that best "before" run, the "after" p95 is about a
+  third.
+
+![120 req/s, before vs after](proofs/screenshots/perf/final-120-before-after.png)
+
+**Why the difference is so large at 120.** The old code is right at its
+limit there: every catalog request (55 % of the traffic with product detail)
+counts all products, reads deep pages row by row and calls the inventory
+service, and the database and PHP use nearly all 12 cores. A short stall
+tips it into a queue it cannot drain. In the new code most catalog requests
+are answered from Redis (and 60 % of `browse_list` with a bodiless 304), so
+the same 120 req/s cost much less CPU, and the margin absorbs the stalls.
+That margin, not a few milliseconds per request, is the main gain: the
+same machine now handles this load steadily.
+
+#### 40 req/s (normal load)
+
+| Endpoint | Before p50 / p95 / p99 | After p50 / p95 / p99 | p50 | p95 |
+|---|---|---|---|---|
+| `GET /products` | 46.8 / 104.9 / 131.1 | **18.3 / 65.9 / 99.9** | −61 % | −37 % |
+| `GET /products/{id}` | 36.0 / 66.9 / 88.3 | 45.7 / 79.4 / 105.2 | +27 % | +19 % |
+| `GET /orders` | 32.8 / 67.6 / 86.4 | 45.0 / 83.0 / 110.8 | +37 % | +23 % |
+| `GET /orders/{id}` | 41.2 / 79.3 / 100.4 | 49.6 / 86.2 / 112.2 | +21 % | +9 % |
+| `GET /notifications` | 37.1 / 72.2 / 87.3 | 44.9 / 79.4 / 102.5 | +21 % | +10 % |
+| `POST /orders` | 80.9 / 130.2 / 147.4 | 106.3 / 158.8 / 180.3 | +31 % | +22 % |
+
+0 errors and 0 dropped iterations on both sides. The three runs of each side
+agree closely (p95 ranges within ±6 ms).
+
+![40 req/s, before vs after](proofs/screenshots/perf/final-40-before-after.png)
+
+**At normal load the catalog is much faster, and the other endpoints are
+8–25 ms slower.** That is a real cost, and it has identifiable causes:
+
+- **Every request pays more connections.** PHP runs in classic mode, so each
+  request opens its connections from scratch. After 6.4/6.6 a request opens
+  Redis (cache and routing keys) and the replica, and a request that writes
+  also opens the primary: `POST /orders` reads products on the replica first
+  and then writes on the primary, two PostgreSQL handshakes instead of one
+  (~13 ms each, 6.6). Signed-in reads also pay the routing decision (~3 ms,
+  one more Redis lookup for the user's write key).
+- **A cache miss costs more than no cache.** `product_detail` asks for a
+  random product among 50 000, so ~95 % of lookups miss (6.4). A miss makes
+  several Redis round trips (`flexible`'s two keys, the lock, the refill
+  writes, the display stock) before and after the same database read the old
+  code did. With real, skewed traffic the hit ratio would be far higher; with
+  this test it is close to the worst case.
+- **`GET /orders` returns more data** (its items, 6.3: 3.2 → 8.6 MiB per run).
+  It is a bigger answer, not the same answer slower.
+- At 40 req/s the old code had plenty of headroom, so it never queued, and
+  the savings that matter at 120 (CPU) don't show up in latency.
+
+**What would remove most of that cost:** FrankenPHP worker mode (step 7,
+optional), which keeps the application and its PostgreSQL and Redis
+connections alive between requests: it addresses the ~25 ms of boot and
+connection setup measured in section 5, which every endpoint pays, and the
+extra connections added in 6.4/6.6.
+
+#### One run of each side
+
+| | 40 req/s | 120 req/s |
+|---|---|---|
+| Before | ![](proofs/screenshots/perf/k6-before-40-run2.png) | ![](proofs/screenshots/perf/k6-before-120-run2.png) |
+| After | ![](proofs/screenshots/perf/k6-after-40-run2.png) | ![](proofs/screenshots/perf/k6-after-120-run2.png) |
+
+#### The proofs, re-run on 2026-11-11
+
+- ETag freshness (`docs/proofs/etag-freshness.js`): 9/9 checks passed.
+  ![ETag freshness proof](proofs/screenshots/perf/proof-etag-freshness.png)
+- Read-your-writes with a 3 s replica lag
+  (`docs/proofs/replica-read-your-writes.js`): 10/10 checks passed.
+  ![Read-your-writes proof](proofs/screenshots/perf/proof-replica-read-your-writes.png)
+
+#### Summary
+
+| Requirement | Result |
+|---|---|
+| Large data, EXPLAIN, slow queries, N+1 | 200 000 orders; deep catalog page 44 → 10 ms; no N+1 in the API, list items fetched in one query (6.1–6.3) |
+| Read replica, user sees what they created | Streaming replica, LSN-based read-your-writes, proven with a 3 s lag (6.6) |
+| Redis cache with expiry and invalidation | Catalog p50 at 40 req/s 46.8 → 18.3 ms; invalidation after commit, cache + replica trap handled (6.4, 6.6) |
+| ETag / 304 | 60 % of catalog requests answered with 304; catalog bytes −54 % (6.5) |
+| k6 before and after | 120 req/s: p95 −93 to −97 % on every endpoint, no dropped requests; 40 req/s: catalog −61 % p50, other endpoints +8–25 ms (causes above) |
+| An edit is visible at once | Write-through + invalidation after commit + body-hash ETag, proven (6.5, 6.6) |
+
 ### Observed behavior
 
 **Collapse at 120 req/s: queueing close to capacity (2026-11-10).**
