@@ -2,6 +2,7 @@
 
 namespace App\Modules\Products;
 
+use App\Shared\Database\ReadRouter;
 use App\Shared\PerfCounters;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Contracts\Cache\Repository;
@@ -46,6 +47,12 @@ class ProductsCache
 
     /** Set after the first failure: the rest of the request skips the cache. */
     private bool $down = false;
+
+    private const LAST_WRITE_LSN_KEY = 'products:last-write-lsn';
+
+    public function __construct(private ReadRouter $router)
+    {
+    }
 
     private function store(): Repository
     {
@@ -101,7 +108,7 @@ class ProductsCache
             PerfCounters::add($computed ? 'cache_miss' : 'cache_hit');
 
             return $value;
-        }, $load);
+        }, fn () => $this->onPrimary($load));
     }
 
     /**
@@ -113,10 +120,51 @@ class ProductsCache
         try {
             return $this->store()->lock('products:lock:'.$key, self::LOCK_SECONDS)
                 ->block(self::LOCK_WAIT, function () use ($key, $load) {
-                    return $this->store()->get($key) ?? $load();
+                    return $this->store()->get($key) ?? $this->refill($load);
                 });
         } catch (LockTimeoutException) {
+            return $this->refill($load);
+        }
+    }
+
+    /**
+     * Refills a missing or expired entry. The trap this avoids: right after
+     * a product write the entry is invalidated, and a refill read from a
+     * replica that has not replayed the write yet would cache the OLD row for
+     * the whole TTL. So the refill uses the replica only once it has replayed
+     * past the last product write (LSN stored after commit); otherwise, or on
+     * any doubt, the primary. Most refills still go to the replica: the check
+     * is against the last product write, not "always primary".
+     */
+    private function refill(callable $load): mixed
+    {
+        $lsn = $this->store()->get(self::LAST_WRITE_LSN_KEY);
+        if ($lsn !== null && ! $this->router->replicaHasReached($lsn)) {
+            PerfCounters::add('refill_primary');
+
+            return $this->onPrimary($load);
+        }
+
+        $value = $load();
+        PerfCounters::add('refill_'.($this->router->target() ?? ReadRouter::PRIMARY));
+
+        return $value;
+    }
+
+    private static int $primaryDepth = 0;
+
+    /** Runs $load with every read on the primary (nesting-safe). */
+    private function onPrimary(callable $load): mixed
+    {
+        $connection = DB::connection();
+        self::$primaryDepth++;
+        $connection->useWriteConnectionWhenReading(true);
+        try {
             return $load();
+        } finally {
+            if (--self::$primaryDepth === 0) {
+                $connection->useWriteConnectionWhenReading(false);
+            }
         }
     }
 
@@ -152,7 +200,7 @@ class ProductsCache
             $key = sprintf('products:list:v%d:c=%s:l=%d:p=%d', $this->catalogVersion(), self::categoryPart($category), $limit, $page);
 
             return $this->flexible($key, self::LIST_TTL, $load);
-        }, $load);
+        }, fn () => $this->onPrimary($load));
     }
 
     /** @param callable(): int $load */
@@ -162,7 +210,7 @@ class ProductsCache
             $key = sprintf('products:count:v%d:c=%s', $this->catalogVersion(), self::categoryPart($category));
 
             return $this->flexible($key, self::LIST_TTL, $load);
-        }, $load);
+        }, fn () => $this->onPrimary($load));
     }
 
     /**
@@ -214,13 +262,33 @@ class ProductsCache
     // ---- invalidation (always after commit) ----
 
     /** A product was created or changed (fields, image): drop it and every catalog page. */
-    public function productChanged(?string $id): void
+    public function productChanged(?string $id, ?callable $freshRow = null): void
     {
-        DB::afterCommit(function () use ($id): void {
-            $this->invalidate(function () use ($id): void {
-                if ($id !== null) {
-                    $this->store()->forget('products:item:'.$id);
+        DB::afterCommit(function () use ($id, $freshRow): void {
+            $this->invalidate(function () use ($id, $freshRow): void {
+                // 1. Remember where this write is in the WAL: refills wait for
+                //    the replica to pass it (see refill()).
+                if ($this->router->enabled()) {
+                    $this->store()->forever(self::LAST_WRITE_LSN_KEY, $this->router->primaryLsn());
                 }
+                // 2. Write-through: the edited product is read from the
+                //    primary and stored at once, instead of leaving a hole a
+                //    reader could fill from a lagging replica.
+                if ($id !== null) {
+                    $key = 'products:item:'.$id;
+                    $fresh = $freshRow === null ? null : $this->onPrimary($freshRow);
+                    if ($fresh === null) {
+                        $this->store()->forget($key);
+                    } else {
+                        $this->store()->putMany([
+                            $key => $fresh,
+                            // flexible()'s own "created at" entry, so the
+                            // value counts as fresh for its normal TTL.
+                            \Illuminate\Cache\Repository::FLEXIBLE_CREATED_KEY_PREFIX.$key => time(),
+                        ], self::PRODUCT_TTL[1]);
+                    }
+                }
+                // 3. Catalog pages: new version, guarded by the LSN of step 1.
                 // Atomic INCR (Redis INCRBY), no TTL: every page and count key
                 // embeds the version, so all of them are bypassed at once.
                 $this->store()->increment(self::VERSION_KEY);

@@ -708,6 +708,524 @@ with the query counter off; then a separate 30 s run with
   a cross-check.
 - The other endpoints are not cached and stayed within run-to-run variation.
 
+### 6.5 HTTP caching: ETag and 304
+
+**Scope:** `GET /products` and `GET /products/{id}` only (and `HEAD` on them).
+
+**Behavior** (`App\Shared\Http\Middleware\ETagRevalidation`, applied to those
+two routes in `app/Modules/Products/routes.php`):
+
+- A `200` gets `ETag: "<hash of the body>"` and
+  `Cache-Control: no-cache, public`. `no-cache` means "you may keep a copy,
+  but ask me every time": an edit is visible on the very next request. There
+  is **no `max-age`**: with one, a client would reuse its copy without asking
+  and miss an edit until it expired.
+- `public` is there because the body is the same for every caller, and
+  because Symfony appends `private` to any `Cache-Control` that names neither,
+  so a bare `no-cache` cannot be sent. `public, no-cache` lets a future proxy
+  or CDN store the response too, still revalidating every time.
+- When `If-None-Match` matches: `304 Not Modified`, empty body, same `ETag` and
+  `Cache-Control`. Matching follows RFC 9110: a comma-separated list, `*`, and
+  the weak comparison (`W/"x"` matches `"x"`).
+- Errors (400, 404, 5xx), redirects and writes get no `ETag`, and a 304 never
+  replaces an error: `If-None-Match: *` on a missing product is still a 404.
+- `HEAD` gets the same `ETag` as the `GET`: Laravel empties a HEAD body before
+  route middleware runs, so the middleware builds the response as a GET and
+  drops the body itself (a test caught this: HEAD first had the ETag of an
+  empty string).
+- **Same for every user:** both endpoints are public and never read the user
+  or role (the frontend calls them without a token), so no `Vary:
+  Authorization`. If they ever return role-dependent data, add it.
+
+**How the ETag is computed: a hash of the final body (xxh128).** Correct by
+construction: any change in any field changes the bytes, so it changes the
+ETag. That covers the price and the other fields, `stock` and `stock_status`
+(inventory up vs down give different bodies, so different ETags), and the
+page, category and limit (different bodies). Equivalent requests
+(`?page=1&limit=20` and no parameters) have the same body, so the same ETag,
+which is right: it identifies the representation, not the URL. A
+version-based ETag (catalog version + `updated_at` + stock of every product on
+the page + `stock_status` + parameters) would skip the hashing, but it would
+have to list every input of the response, and one input forgotten (now or when
+a field is added) means a wrong 304 and stale data on screen. Hashing ~10 KB
+with xxh128 costs microseconds, and the body is built from Redis anyway.
+Measured with the freshness proof: putting price and stock back to their old
+values still gives a new ETag, because `updated_at` changed, so the body did.
+
+**What a 304 saves here, and what it doesn't.** The server does the same work
+for a 304 as for a 200: Laravel boots, reads Redis (or the database), builds
+the JSON and hashes it. A 304 saves the **transfer of the body** (a catalog
+page is ~10 KB, a 304 is a few hundred bytes of headers) and the **client's
+work** (parsing the JSON and re-rendering). On a phone or a slow network that
+is most of the wait; in our load test, k6 runs on the same machine as the API,
+so the network is nearly free and the server-side time barely changes.
+
+**Nothing in between breaks it** (checked live):
+
+- No compression on the way: Caddy has no `encode` directive and the
+  frontend's nginx has no `gzip`. (A server that gzips can turn a strong ETag
+  into a weak `W/` one; the weak comparison in `If-None-Match` handles that
+  anyway.) A request with `Accept-Encoding: gzip` gets the same strong ETag.
+- Through the frontend's nginx (`:8080`) the `ETag`, `If-None-Match` and the
+  304 pass unchanged.
+- No CORS: the frontend reaches the API on the same origin (nginx in Docker,
+  the Vite proxy in development), and the browser revalidates by itself, so
+  JavaScript never needs to read the `ETag` and no
+  `Access-Control-Expose-Headers` is needed.
+
+**Tests** (`tests/Feature/ProductsEtagTest.php`): first request 200 with an
+ETag and `no-cache`; the same ETag gives 304 with an empty body; an admin edit
+(`PATCH` with an admin token) gives 200, the new data and a new ETag for the
+old one; `AdjustStock` gives a new ETag; inventory up vs down give different
+ETags; different page / category / limit give different ETags and an
+equivalent request the same one; 404 and 400 never get an ETag or a 304, even
+with `*`; writes get no ETag; lists, `*` and `W/` in `If-None-Match`; HEAD has
+the GET's ETag; the matcher itself against RFC 9110 cases.
+
+**Freshness proof** (`docs/proofs/etag-freshness.js`, required by the
+assignment):
+
+```powershell
+$env:ADMIN_EMAIL="admin@example.com"; $env:ADMIN_PASSWORD="<from .env>"
+node docs/proofs/etag-freshness.js
+```
+
+Output on 2026-11-10 (Wireless Mouse sample product):
+
+```
+1. First read
+   GET: 200  ETag "680adaafd2894057349731131badd5ba"  Cache-Control "no-cache, public"  body 265 B  price 19.99, stock 496
+2. Same request with If-None-Match: <that ETag>
+   GET: 304  ETag "680adaafd2894057349731131badd5ba"  body 0 B
+3. Admin changes the price 19.99 -> 20.99 and adds 5 to the stock
+   PATCH price: 200, PATCH stock: 200
+4. Immediately: GET with the OLD ETag
+   GET: 200  ETag "d99f808a9edd7dd52d077d35cf2a1c02"  body 265 B  price 20.99, stock 501
+5. GET with the NEW ETag
+   GET: 304  ETag "d99f808a9edd7dd52d077d35cf2a1c02"  body 0 B
+6. Put the product back
+ALL CHECKS PASSED (9 checks)
+```
+
+The edit is visible on the first request after it, for a client that still
+holds the old ETag: the Redis entry is invalidated after commit (6.4), so the
+body is new, so the ETag is new, so the old one no longer matches.
+
+**k6: a client that revalidates.** Each VU keeps the last ETag per URL and
+sends it as `If-None-Match` on `browse_list` and `product_detail`, as a
+browser does (`ETAG=0` turns it off). 304s are counted as their own category
+(not as errors), with separate response-time trends for 200 and 304, the 304
+ratio, and bytes received per endpoint.
+
+#### Quick check at 100 req/s
+
+Two runs back to back on the same data and the same machine state, each after
+a 30 s warm-up: `ETAG=0` (the client never sends `If-None-Match`, which is the
+previous step's behavior) and `ETAG=1` (it revalidates like a browser).
+2026-11-10.
+
+| | `ETAG=0` (as in 6.4) | `ETAG=1` |
+|---|---|---|
+| `browse_list` p50 / p95 / p99 | 15.6 / 67.6 / 93.8 ms | 14.0 / 57.3 / 67.9 ms |
+| `browse_list` 304 ratio | — | **60.7 %** |
+| `browse_list` 200 vs 304 (p50 / p95 / p99) | 200: 15.6 / 67.6 / 93.8 | 200: 27.0 / 63.0 / 76.2 · **304: 12.7 / 23.3 / 30.3** |
+| `browse_list` bytes received | 31.19 MiB | **14.12 MiB (−55 %)** |
+| `product_detail` p50 / p95 / p99 | 42.1 / 66.7 / 100.6 ms | 38.7 / 52.6 / 66.8 ms |
+| `product_detail` 304 ratio | — | 0.0 % (1 request in 3 001) |
+| `product_detail` bytes received | 3.65 MiB | 3.65 MiB |
+| All data received (setup included) | 79.6 MiB | 62.9 MiB (−21 %) |
+
+All requests: 0 errors, 0 dropped iterations.
+
+What the numbers say:
+
+- **The bytes are the clear win.** 60.7 % of catalog requests were answered
+  with a 304, and the catalog's received bytes fell by 55 %. That is what an
+  ETag saves: the body on the wire and the client's work with it.
+- **A 304 is faster mostly because of what is not sent and parsed.** 304 p50
+  12.7 ms. The server work is the same as for a 200 (boot, Redis, JSON, hash),
+  so the gap to a fast 200 is a few ms here, where k6 sits next to the API; on
+  a real network the body transfer is a larger share of the wait.
+- **The "200" column in the `ETAG=1` run is not comparable to the `ETAG=0`
+  run** (27.0 vs 15.6 ms p50). It is a different mix: the requests that still
+  get a 200 are the ones whose ETag the VU did not have or that changed,
+  mostly deep pages seen for the first time, which are also cache misses in
+  Redis. The fast repeat visits moved into the 304 column.
+- **Product detail gains nothing in this test, by design of the test.** A VU
+  asks for a random product among 50 000, so it almost never asks for the
+  same one twice, and a 304 needs a previous copy. A real visitor going back
+  to a product page would get one.
+- **The other endpoints were also 2–4 ms faster in the second run**, though
+  they don't use ETags at all. That is run-to-run variation (and slightly less
+  CPU load from smaller responses), and it puts the p50 differences above in
+  proportion: the bytes and the 304 ratio are the solid results; single-run
+  p95/p99 differences are not.
+- **VUs revalidate more than browsers would.** A VU makes thousands of
+  requests and keeps its ETags for the whole run, so the 60.7 % is an upper
+  range for repeat visits to the first catalog pages, not a prediction for
+  real users.
+
+### 6.6 Read replica and read-your-writes
+
+```
+                writes, transactions, sticky reads,
+                reads that must see a recent write
+   backend ───────────────────────────────────────────▶  db (primary)
+      │                                                     │ WAL, streaming
+      │   other reads, when the replica is healthy          ▼
+      └───────────────────────────────────────────────▶  db_replica (hot standby, read-only)
+      │
+      └──▶ redis: ryw:user:{id} = LSN of the user's last write
+                  products:last-write-lsn, db:replica-status (shared, 200 ms), db:replica-down
+```
+
+**Infrastructure** (official `postgres:16-alpine` only, `README.md` → "Read replica"):
+
+- `db` is the primary: `wal_level=replica` (PostgreSQL 16's default),
+  `max_wal_senders=5`, `max_replication_slots=5`, `max_slot_wal_keep_size=1GB`,
+  and `hba_file=/etc/postgresql/pg_hba.conf` mounted from `postgres/pg_hba.conf`
+  (the image's defaults plus one `host replication all all scram-sha-256`
+  line). A mounted hba file works on the existing data volume, where
+  `docker-entrypoint-initdb.d` scripts no longer run.
+- `db_replica` runs `postgres/replica-entrypoint.sh`: on an empty volume it
+  creates the replication role on the primary (`REPLICATION_USER` /
+  `REPLICATION_PASSWORD` from `.env`, never committed), drops a leftover
+  inactive slot, and runs `pg_basebackup -R -X stream -C -S replica_slot`; on
+  every start it runs `postgres` as a hot standby with
+  `recovery_min_apply_delay=$REPLICA_APPLY_DELAY` (0 unless the lag demo is on).
+- The slot keeps WAL for a stopped replica; `max_slot_wal_keep_size=1GB` caps
+  it, so a replica that is down for long cannot fill the primary's disk (the
+  slot is invalidated instead, and the replica is rebuilt: README).
+- Only the Laravel database has a replica; `inventory_db` is unchanged.
+
+**Laravel.** `config/database.php`: when `DB_READ_HOST` is set, the `pgsql`
+connection gets `read.host = db_replica` (2 s connect timeout),
+`write.host = db` and `sticky = true`. `DB_READ_HOST` is empty, so a single
+connection to the primary, for the tests, the scheduler (outbox,
+`inventory:flush-outbox`), `perf-tools` (`perf:seed` reads its own temporary
+tables) and the migrations and seeders (`docker-entrypoint.sh` runs them with
+`DB_READ_HOST=`), so none of them ever reads a lagging replica.
+`OrdersRepository::outboxPending()` also reads with
+`selectFromWriteConnection`.
+
+What Laravel already guarantees (checked in `ReadRouterTest`): every write
+uses the primary; **every read inside a transaction uses the primary**
+(`getReadPdo()` returns the write PDO while `transactions > 0`); and with
+`sticky`, every read after a write **in the same request** uses the primary.
+
+**A bug the replica exposed.** Five writes used `DB::select('INSERT/UPDATE
+... RETURNING ...')` to get the row back. Laravel treats `select()` as a read,
+so with the replica on, the product edit was sent to `db_replica` and failed
+(`read-only transaction`), and those writes did not mark the connection as
+written, so `sticky` did not apply after them. They now go through
+`App\Shared\Database\Sql::returning()` (primary + marks the write), and
+`tests/Architecture/WritesUseThePrimaryTest` fails the build if a write
+statement goes through a read method again. The proof script found it.
+
+#### Routing rules (`App\Shared\Database\ReadRouter`)
+
+Decided lazily, on the first read of a request that Laravel would send to the
+read connection:
+
+| Situation | Reads go to |
+|---|---|
+| Write, transaction, read after a write in the same request | primary (Laravel) |
+| The user wrote recently and the replica has not replayed that write yet (`pg_last_wal_replay_lsn()` < the user's LSN) | primary |
+| The user wrote recently and the replica is past it | replica |
+| No recent write by this user (or anonymous) | replica |
+| Replica lag above `REPLICA_MAX_LAG_SECONDS` (5 s) | primary, one warning |
+| Replica unreachable | primary, one warning; every request skips it for `REPLICA_DOWN_SECONDS` (10 s) |
+| Redis down, or the check fails | primary |
+
+**Read-your-writes: LSN, not a time window.** After every successful write
+(non-GET, 2xx) by a signed-in user, the global middleware `RecordWrites`
+stores the primary's `pg_current_wal_lsn()` under `ryw:user:{id}` (TTL 5 min).
+That user's reads use the replica only once `pg_last_wal_replay_lsn()` on the
+replica has reached that position. Why LSN:
+
+- It is exact: it holds however long the lag is. A time window (e.g. "primary
+  for 5 s after a write") is wrong exactly when it matters, when the replica
+  lags more than the window, and needlessly sends reads to the primary when
+  the replica caught up in milliseconds (the usual case here).
+- The TTL only cleans the key up. If the replica were more than 5 minutes
+  behind, the lag threshold already sends everyone to the primary.
+- It covers every write path without touching the services: create order,
+  status change, cancel, mark notification(s) read, device register and
+  unregister, admin product create, edit and stock.
+
+**The key is stored before the response leaves.** `RecordWrites` does it in
+`handle()`, after the controller and before returning the response, never in
+`terminate()` (which runs after the response is sent). Otherwise a fast client
+could send its next GET before the key exists and read from the replica.
+`RecordWritesTest` checks both: the key exists when `handle()` returns, and the
+class has no `terminate()`.
+
+**The replica position is checked at most every 200 ms, shared.** The router
+keeps `{replay_lsn, lag}` in Redis (`db:replica-status`) and queries the
+replica (one `SELECT` on the connection it opens anyway) only when that entry
+is older than `REPLICA_STATUS_TTL_MS` (200 ms): a handful of status queries per
+second in total, not one per request. Lag counts only while WAL is waiting to
+be replayed (`receive_lsn <> replay_lsn`), so an idle replica has no lag.
+
+**The guarantee's limit.** Read-your-writes covers the user's **own** writes.
+Writes by others reach a user through the replica after the replication lag:
+when an admin changes the status of a customer's order, that customer may see
+the old status until the replica has replayed it (eventual consistency). With
+the measured lag (below) that is a few milliseconds; with the demo delay it
+is 3 s.
+
+#### The Redis cache + replica trap
+
+After a product edit the cache entry is invalidated. If the next request
+refills it from a replica that has not replayed the edit yet, the **old** row
+is cached again, for the whole TTL (10 minutes for a product). Always
+refilling from the primary would avoid it but would send almost every refill
+there (95 % of product-detail lookups are misses in our test). Instead:
+
+1. After the commit of any product write, `ProductsCache` stores the primary's
+   LSN as `products:last-write-lsn` (no TTL).
+2. A refill (cold miss or `flexible`'s background refresh) reads the replica
+   only if the replica has replayed past that LSN; otherwise, or if Redis or
+   the check fails, it reads the primary (`useWriteConnectionWhenReading`).
+   The comparison is against the last product write, so between product edits
+   refills go to the replica as before.
+3. Write-through for the product detail: after an edit, the fresh row is read
+   from the primary and stored in the cache at once (with `flexible`'s
+   timestamp), so there is no hole to refill at all. Catalog pages keep the
+   version-key invalidation, protected by rule 2.
+
+`ProductsCacheReplicaTest` covers it with a replica that is behind: refills
+go to the primary while it is behind the last write, to the replica once it is
+past it; without any product write refills never wait; an edit writes the
+fresh row through and records its LSN.
+
+#### Proof: the user sees what they just wrote
+
+`docs/proofs/replica-read-your-writes.js`, with `REPLICA_APPLY_DELAY=3s`
+(2026-11-10):
+
+```
+Read-your-writes proof against http://localhost:3000; replica recovery_min_apply_delay = 3s
+
+1. Customer creates an order, then reads it back at once
+   PASS  order created  (201, id 1b0208fc-abe3-4159-bb16-35d2c3961182)
+   PASS  GET /orders shows it  (200, 48 ms, reads: primary)
+   PASS  GET /orders/{id} shows it  (200, 47 ms, reads: primary)
+
+2. The same order read directly on the replica, right now
+   PASS  the replica does NOT have it yet (the lag is real)  (count = 0)
+   PASS  after 3500 ms the replica has it  (count = 1)
+
+3. Admin edits a product, then it is read at once
+   PASS  price 20.99 -> 21.99 accepted
+   PASS  GET /products/{id} with the old ETag: 200, not 304  (200, reads: none)
+   PASS  it shows the new price at once  (21.99)
+   PASS  with a new ETag
+   PASS  while the replica itself still has the old price  (replica: 20.99)
+
+ALL CHECKS PASSED (10 checks)
+```
+
+`reads: none` in step 3: the product came from Redis, written through after
+the edit; neither database was read. (`reads:` is the `X-DB-Read` header,
+present when `PERF_QUERY_LOG=true`.)
+
+**Replica stopped, measured live:** every request answered 200 from the
+primary. The first took 1.5 s (resolving the stopped container's name fails
+slowly), the next ones ~40 ms, because the 10 s "replica down" key makes every
+request skip it.
+
+#### Quick check at 100 req/s
+
+Back to back on the same data and machine state (2026-11-10), each after a
+30 s warm-up: **A** without the replica (`DB_READ_HOST=`, every read on the
+primary) and **B** with it; then **C**, 30 s with `PERF_QUERY_LOG=true` for the
+routing counters. `pg_stat_replication.replay_lag` sampled every 5 s during B.
+
+| Endpoint | A: no replica, p50 / p95 / p99 | B: replica, p50 / p95 / p99 |
+|---|---|---|
+| `browse_list` | 14.9 / 64.8 / 88.5 | 14.7 / 62.4 / 81.2 |
+| `product_detail` | 39.8 / 59.2 / 96.2 | 41.3 / 62.0 / 101.2 |
+| `my_orders` | 39.5 / 58.6 / 92.5 | 42.5 / 64.2 / 101.9 |
+| `order_detail` | 38.3 / 56.6 / 92.8 | 41.3 / 62.3 / 100.1 |
+| `my_notifications` | 34.7 / 51.7 / 87.0 | 37.7 / 57.6 / 90.9 |
+| `create_order` | 76.1 / 109.0 / 164.0 | **96.0 / 133.4 / 180.8** |
+
+0 errors and 0 dropped iterations in both.
+
+**Replication lag during B:** median **2.2 ms**, min 1.8 ms, max 14.8 ms
+(24 samples). That is the window of eventual consistency for other users'
+writes.
+
+**Routing (C):**
+
+| Endpoint | Reads on replica / primary | Routing decision, avg / p95 | Replica connect, avg | Cache refills replica / primary |
+|---|---|---|---|---|
+| `browse_list` | 79 / 0 | 0.05 / 0.51 ms | 13.4 ms | 79 / 0 |
+| `product_detail` | 632 / 0 | 0.45 / 0.78 ms | 12.9 ms | 632 / 0 |
+| `my_orders` | 450 / 1 | 2.93 / 6.18 ms | 13.6 ms | — |
+| `order_detail` | 361 / 0 | 2.84 / 5.83 ms | 13.4 ms | — |
+| `my_notifications` | 391 / 0 | 3.12 / 6.02 ms | 13.2 ms | — |
+| `create_order` | 149 / 1 | 2.96 / 5.78 ms | 14.7 ms | — |
+
+(Requests answered entirely from Redis read no database and are not counted;
+that is why `browse_list` shows only 79.)
+
+What the numbers say, honestly:
+
+- **The replica does not make anything faster here, and `create_order` got
+  ~20 ms slower.** Every read endpoint is within a few ms of A (slightly
+  worse). `create_order` now reads the products first, so its first read opens
+  a connection to the replica (~13 ms, scram auth), and then the write opens a
+  second connection to the primary. Without a replica it opens one. Same cause
+  for a smaller share of the read endpoints: the replica connection costs what
+  the primary connection cost, so nothing is saved per request.
+- **The routing decision itself is cheap:** 0.05–0.45 ms for anonymous
+  requests (two Redis lookups, the replica position from the shared 200 ms
+  entry), ~3 ms for signed-in requests (one more lookup for the user's write
+  key, and they more often refresh the shared position). The replica
+  connection (~13 ms) is the real per-request cost, and it is the same as the
+  primary connection it replaces.
+- **Almost every read went to the replica** (1 862 of 1 864 requests); the 2
+  on the primary are reads right after the same user's write that the replica
+  had not replayed yet: read-your-writes at work. All 711 cache refills read
+  the replica: no product was edited during the run, so the last-write check
+  never had to send them to the primary.
+- **Why no gain on this machine:** both databases run on the same 12 CPUs and
+  the same disk, so moving reads to the replica only moves the load, it does
+  not add capacity. The primary was not the bottleneck either (section 5: the
+  time per request is mostly Laravel's boot and connection setup, and most
+  catalog reads now never reach a database at all, thanks to Redis).
+- **When a replica does help:** on separate hardware, when the primary is
+  saturated by reads (CPU or I/O), to keep heavy reads (reports, exports,
+  analytics) off the primary, and for availability (a standby ready to be
+  promoted). Here it is in place and correct (read-your-writes, the cache
+  trap, the fallbacks); its gain needs a second machine to show.
+
+### 6.7 Final comparison: before vs after, back to back
+
+**Method.** One session on 2026-11-11, quiet machine, AC power. Both sides run
+the same k6 script (a revalidating client: it sends `If-None-Match`; the old
+code ignores it and always answers 200) at the same rates, on freshly seeded
+data with an empty Redis:
+
+- **Before:** a backend image built from the baseline commit `833dc94` (in a
+  separate git worktree), with the 6.1 index migration rolled back, so the
+  old code ran on its old indexes.
+- **After:** the current code (6.1–6.6: indexes, deferred join, items in the
+  list, Redis, ETag/304, read replica with read-your-writes).
+
+Per side and rate: 2 min warm-up (not counted), then 3 runs of 2 min; the
+values are the median of the 3 runs, with the lowest–highest run in brackets
+where it matters. Images of the outputs are in
+`docs/proofs/screenshots/perf/`.
+
+The first attempt of the "before" runs at 40 req/s is not used: the laptop
+went to sleep during run 1 (79 % network errors, 1 074 dropped iterations).
+All three were redone in the same session, from a fresh seed, after the other
+sets; the discarded results are kept in `perf/results/discarded-sleep/`.
+
+#### 120 req/s (about 70 % of the measured ceiling)
+
+| Endpoint | Before p50 / p95 / p99 | After p50 / p95 / p99 | p50 | p95 |
+|---|---|---|---|---|
+| `GET /products` | 110.7 / 2207.0 / 2647.6 | **17.4 / 63.4 / 106.9** | −84 % | −97 % |
+| `GET /products/{id}` | 66.2 / 2129.8 / 2445.2 | 44.9 / 83.1 / 146.0 | −32 % | −96 % |
+| `GET /orders` | 61.5 / 2129.5 / 2441.9 | 48.3 / 85.0 / 143.6 | −21 % | −96 % |
+| `GET /orders/{id}` | 68.4 / 2086.8 / 2503.9 | 47.5 / 79.4 / 147.2 | −31 % | −96 % |
+| `GET /notifications` | 62.7 / 2146.6 / 2475.3 | 42.7 / 73.4 / 136.5 | −32 % | −97 % |
+| `POST /orders` | 132.3 / 2253.9 / 2703.6 | 106.7 / 165.3 / 263.2 | −19 % | −93 % |
+
+- Dropped iterations: before up to 103 per run, after 0. Errors: 0 on both sides.
+- `browse_list`: 60 % of requests answered with 304; catalog bytes received
+  37.1 → 17.2 MiB per run.
+- p95 ranges over the 3 runs: before 109–2 755 ms (`browse_list` 203–2 755),
+  after 60–92 ms. **Two of the three "before" runs fell into the queue**
+  described in "Observed behavior" (p95 above 2 s); the third stayed just
+  below it. Even against that best "before" run, the "after" p95 is about a
+  third.
+
+![120 req/s, before vs after](proofs/screenshots/perf/final-120-before-after.png)
+
+**Why the difference is so large at 120.** The old code is right at its
+limit there: every catalog request (55 % of the traffic with product detail)
+counts all products, reads deep pages row by row and calls the inventory
+service, and the database and PHP use nearly all 12 cores. A short stall
+tips it into a queue it cannot drain. In the new code most catalog requests
+are answered from Redis (and 60 % of `browse_list` with a bodiless 304), so
+the same 120 req/s cost much less CPU, and the margin absorbs the stalls.
+That margin, not a few milliseconds per request, is the main gain: the
+same machine now handles this load steadily.
+
+#### 40 req/s (normal load)
+
+| Endpoint | Before p50 / p95 / p99 | After p50 / p95 / p99 | p50 | p95 |
+|---|---|---|---|---|
+| `GET /products` | 46.8 / 104.9 / 131.1 | **18.3 / 65.9 / 99.9** | −61 % | −37 % |
+| `GET /products/{id}` | 36.0 / 66.9 / 88.3 | 45.7 / 79.4 / 105.2 | +27 % | +19 % |
+| `GET /orders` | 32.8 / 67.6 / 86.4 | 45.0 / 83.0 / 110.8 | +37 % | +23 % |
+| `GET /orders/{id}` | 41.2 / 79.3 / 100.4 | 49.6 / 86.2 / 112.2 | +21 % | +9 % |
+| `GET /notifications` | 37.1 / 72.2 / 87.3 | 44.9 / 79.4 / 102.5 | +21 % | +10 % |
+| `POST /orders` | 80.9 / 130.2 / 147.4 | 106.3 / 158.8 / 180.3 | +31 % | +22 % |
+
+0 errors and 0 dropped iterations on both sides. The three runs of each side
+agree closely (p95 ranges within ±6 ms).
+
+![40 req/s, before vs after](proofs/screenshots/perf/final-40-before-after.png)
+
+**At normal load the catalog is much faster, and the other endpoints are
+8–25 ms slower.** That is a real cost, and it has identifiable causes:
+
+- **Every request pays more connections.** PHP runs in classic mode, so each
+  request opens its connections from scratch. After 6.4/6.6 a request opens
+  Redis (cache and routing keys) and the replica, and a request that writes
+  also opens the primary: `POST /orders` reads products on the replica first
+  and then writes on the primary, two PostgreSQL handshakes instead of one
+  (~13 ms each, 6.6). Signed-in reads also pay the routing decision (~3 ms,
+  one more Redis lookup for the user's write key).
+- **A cache miss costs more than no cache.** `product_detail` asks for a
+  random product among 50 000, so ~95 % of lookups miss (6.4). A miss makes
+  several Redis round trips (`flexible`'s two keys, the lock, the refill
+  writes, the display stock) before and after the same database read the old
+  code did. With real, skewed traffic the hit ratio would be far higher; with
+  this test it is close to the worst case.
+- **`GET /orders` returns more data** (its items, 6.3: 3.2 → 8.6 MiB per run).
+  It is a bigger answer, not the same answer slower.
+- At 40 req/s the old code had plenty of headroom, so it never queued, and
+  the savings that matter at 120 (CPU) don't show up in latency.
+
+**What would remove most of that cost:** FrankenPHP worker mode (step 7,
+optional), which keeps the application and its PostgreSQL and Redis
+connections alive between requests: it addresses the ~25 ms of boot and
+connection setup measured in section 5, which every endpoint pays, and the
+extra connections added in 6.4/6.6.
+
+#### One run of each side
+
+| | 40 req/s | 120 req/s |
+|---|---|---|
+| Before | ![](proofs/screenshots/perf/k6-before-40-run2.png) | ![](proofs/screenshots/perf/k6-before-120-run2.png) |
+| After | ![](proofs/screenshots/perf/k6-after-40-run2.png) | ![](proofs/screenshots/perf/k6-after-120-run2.png) |
+
+#### The proofs, re-run on 2026-11-11
+
+- ETag freshness (`docs/proofs/etag-freshness.js`): 9/9 checks passed.
+  ![ETag freshness proof](proofs/screenshots/perf/proof-etag-freshness.png)
+- Read-your-writes with a 3 s replica lag
+  (`docs/proofs/replica-read-your-writes.js`): 10/10 checks passed.
+  ![Read-your-writes proof](proofs/screenshots/perf/proof-replica-read-your-writes.png)
+
+#### Summary
+
+| Requirement | Result |
+|---|---|
+| Large data, EXPLAIN, slow queries, N+1 | 200 000 orders; deep catalog page 44 → 10 ms; no N+1 in the API, list items fetched in one query (6.1–6.3) |
+| Read replica, user sees what they created | Streaming replica, LSN-based read-your-writes, proven with a 3 s lag (6.6) |
+| Redis cache with expiry and invalidation | Catalog p50 at 40 req/s 46.8 → 18.3 ms; invalidation after commit, cache + replica trap handled (6.4, 6.6) |
+| ETag / 304 | 60 % of catalog requests answered with 304; catalog bytes −54 % (6.5) |
+| k6 before and after | 120 req/s: p95 −93 to −97 % on every endpoint, no dropped requests; 40 req/s: catalog −61 % p50, other endpoints +8–25 ms (causes above) |
+| An edit is visible at once | Write-through + invalidation after commit + body-hash ETag, proven (6.5, 6.6) |
+
 ### Observed behavior
 
 **Collapse at 120 req/s: queueing close to capacity (2026-11-10).**

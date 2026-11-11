@@ -97,7 +97,24 @@ return [
             'prefix_indexes' => true,
             'search_path' => 'public',
             'sslmode' => env('DB_SSLMODE', 'prefer'),
-        ],
+        ] + (env('DB_READ_HOST') ? [
+            // Read replica (docs/performance.md, 6.6). Reads go to the
+            // replica only when App\Shared\Database\ReadRouter allows it;
+            // writes, transactions and reads after a write in the same
+            // request (sticky) always use the primary. Empty DB_READ_HOST:
+            // one connection to the primary (tests, scheduler, perf-tools,
+            // migrations).
+            'read' => [
+                'host' => [env('DB_READ_HOST')],
+                // Fail fast when the replica is unreachable: the router then
+                // falls back to the primary.
+                'options' => [PDO::ATTR_TIMEOUT => (int) env('DB_READ_CONNECT_TIMEOUT', 2)],
+            ],
+            'write' => [
+                'host' => [env('DB_HOST', '127.0.0.1')],
+            ],
+            'sticky' => true,
+        ] : []),
 
         'sqlsrv' => [
             'driver' => 'sqlsrv',

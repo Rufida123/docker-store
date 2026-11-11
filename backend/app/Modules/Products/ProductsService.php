@@ -250,7 +250,7 @@ class ProductsService
 
                 // Runs after the commit (new product, possibly with an image);
                 // a rolled-back create invalidates nothing.
-                $this->cache->productChanged($product['id']);
+                $this->cache->productChanged($product['id'], fn () => $this->repo->findById($product['id']));
 
                 return self::withStock($product, $available, 'available');
             });
@@ -347,7 +347,8 @@ class ProductsService
         if ($product === null) {
             throw new AppError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
         }
-        $this->cache->productChanged($product['id']); // after commit
+        // After commit: write-through of the edited row, new catalog version.
+        $this->cache->productChanged($product['id'], fn () => $this->repo->findById($product['id']));
 
         $stock = $this->stockLevels([$product['id']]);
 

@@ -219,7 +219,10 @@ class OrdersRepository
      */
     public function outboxPending(int $limit = 100): array
     {
-        $rows = DB::select(
+        // Always the primary: a release parked a moment ago may not be on the
+        // replica yet (the scheduler has no replica anyway; this also covers
+        // a delivery from an API request).
+        $rows = DB::selectFromWriteConnection(
             'SELECT reservation_id FROM inventory_outbox ORDER BY created_at LIMIT ?',
             [$limit],
         );

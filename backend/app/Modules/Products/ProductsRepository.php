@@ -2,6 +2,7 @@
 
 namespace App\Modules\Products;
 
+use App\Shared\Database\Sql;
 use App\Shared\Time;
 use Illuminate\Support\Facades\DB;
 
@@ -16,7 +17,7 @@ class ProductsRepository
 
     public function create(array $data): array
     {
-        $rows = DB::select(
+        $rows = Sql::returning(
             'INSERT INTO products (name, description, category, price, image_url)
              VALUES (?, ?, ?, ?, ?)
              RETURNING '.self::PRODUCT_COLUMNS,
@@ -86,7 +87,7 @@ class ProductsRepository
         }
         $params[] = $id;
 
-        $rows = DB::select(
+        $rows = Sql::returning(
             'UPDATE products SET '.implode(', ', $sets).', updated_at = NOW()
               WHERE id = ?
               RETURNING '.self::PRODUCT_COLUMNS,

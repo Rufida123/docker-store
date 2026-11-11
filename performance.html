@@ -1,0 +1,1080 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>أداء Docker Store</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&display=swap">
+<style>
+/* Layout: a single right-to-left reading column (lab notebook), sticky section index on top,
+   wide tables / plans / charts scroll inside their own boxes. */
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --surface-2: #eef1f5;
+  --line: #d9dee6;
+  --ink: #12161c;
+  --ink-2: #4a5361;
+  --ink-3: #6b7482;
+  --accent: #2a78d6;
+  --accent-ink: #1c5cab;
+  --accent-soft: #e3eefb;
+  --good: #1f7a3d;
+  --good-soft: #e3f3e8;
+  --warn: #9a5b00;
+  --warn-soft: #fbf0dc;
+  --bad: #b3261e;
+  --bad-soft: #fbe6e4;
+  --stage-0: #86b6ef;
+  --stage-1: #2a78d6;
+  --stage-2: #104281;
+  --chart-ref: #9aa3b0;
+  --font-body: "IBM Plex Sans Arabic", "Segoe UI", Tahoma, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111418; --surface: #181c22; --surface-2: #1f242c; --line: #2c333d;
+    --ink: #eef1f5; --ink-2: #b6bdc8; --ink-3: #8b94a1;
+    --accent: #3987e5; --accent-ink: #86b6ef; --accent-soft: #19283b;
+    --good: #6cc98a; --good-soft: #15291c; --warn: #e3a948; --warn-soft: #2e2413; --bad: #f08a83; --bad-soft: #321a19;
+    --stage-0: #184f95; --stage-1: #3987e5; --stage-2: #9ec5f4; --chart-ref: #5d6673;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111418; --surface: #181c22; --surface-2: #1f242c; --line: #2c333d;
+  --ink: #eef1f5; --ink-2: #b6bdc8; --ink-3: #8b94a1;
+  --accent: #3987e5; --accent-ink: #86b6ef; --accent-soft: #19283b;
+  --good: #6cc98a; --good-soft: #15291c; --warn: #e3a948; --warn-soft: #2e2413; --bad: #f08a83; --bad-soft: #321a19;
+  --stage-0: #184f95; --stage-1: #3987e5; --stage-2: #9ec5f4; --chart-ref: #5d6673;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  background: var(--bg); color: var(--ink);
+  font-family: var(--font-body); font-size: 16px; line-height: 1.75;
+  direction: rtl;
+}
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--surface); }
+.wrap {
+  max-width: 1040px; margin: 0 auto;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+h1, h2, h3 { text-wrap: balance; line-height: 1.35; margin: 0; }
+h1 { font-size: 2rem; font-weight: 700; }
+h2 { font-size: 1.5rem; font-weight: 700; }
+h3 { font-size: 1.15rem; font-weight: 600; }
+p { margin: 0; max-width: 68ch; }
+a { color: var(--accent-ink); }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+code, .mono { font-family: var(--font-mono); font-size: 0.86em; }
+code { direction: ltr; unicode-bidi: isolate; background: var(--surface-2); padding: 0.05em 0.35em; border-radius: 4px; }
+pre {
+  direction: ltr; text-align: left; margin: 0;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px;
+  padding: 14px 16px; overflow-x: auto; font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.6; color: var(--ink);
+}
+pre code { background: none; padding: 0; font-size: inherit; }
+ul, ol { margin: 0; padding-inline-start: 1.3em; display: grid; gap: 6px; max-width: 72ch; }
+strong { font-weight: 600; }
+.num { font-variant-numeric: tabular-nums; }
+
+/* header */
+.top { background: var(--surface); border-bottom: 1px solid var(--line); }
+.top .wrap { padding-block: 32px 24px; display: grid; gap: 14px; }
+.eyebrow { color: var(--ink-3); font-size: 0.85rem; letter-spacing: 0.02em; }
+.lede { color: var(--ink-2); font-size: 1.05rem; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; font-size: 0.82rem; font-weight: 500; padding: 3px 10px; border-radius: 999px; border: 1px solid transparent; white-space: nowrap; }
+.chip::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.chip.done { background: var(--good-soft); color: var(--good); }
+.chip.wip { background: var(--warn-soft); color: var(--warn); }
+.chip.todo { background: var(--surface-2); color: var(--ink-3); border-color: var(--line); }
+.chip.info { background: var(--accent-soft); color: var(--accent-ink); }
+
+/* section index */
+.index { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: color-mix(in srgb, var(--surface) 92%, transparent); backdrop-filter: blur(6px); border-bottom: 1px solid var(--line); }
+.index .wrap { display: flex; gap: 4px; overflow-x: auto; padding-block: 8px; scrollbar-width: thin; }
+.index a { flex: none; text-decoration: none; color: var(--ink-2); font-size: 0.88rem; padding: 4px 10px; border-radius: 6px; }
+.index a:hover { background: var(--surface-2); color: var(--ink); }
+
+main .wrap { display: grid; gap: 56px; padding-block: 36px 72px; }
+section { display: grid; gap: 18px; scroll-margin-top: 64px; min-width: 0; }
+.sec-head { display: grid; gap: 6px; }
+.sec-head .eyebrow { font-family: var(--font-mono); direction: ltr; text-align: right; }
+.sub { display: grid; gap: 12px; min-width: 0; }
+
+/* key figures */
+.figs { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
+.fig { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: grid; gap: 2px; align-content: start; }
+.fig .k { color: var(--ink-3); font-size: 0.85rem; }
+.fig .v { font-family: var(--font-mono); font-size: 1.55rem; font-weight: 600; direction: ltr; text-align: right; font-variant-numeric: tabular-nums; }
+.fig .v small { font-size: 0.9rem; color: var(--ink-3); font-weight: 400; }
+.fig .n { color: var(--ink-2); font-size: 0.85rem; }
+
+/* callouts */
+.note { border-inline-start: 3px solid var(--accent); background: var(--accent-soft); padding: 12px 16px; border-radius: 0 8px 8px 0; display: grid; gap: 6px; }
+.note.warn { border-color: var(--warn); background: var(--warn-soft); }
+.note.bad { border-color: var(--bad); background: var(--bad-soft); }
+.note p { max-width: none; }
+
+/* tables */
+.tbl { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+th, td { padding: 9px 12px; text-align: right; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-weight: 600; color: var(--ink-2); background: var(--surface-2); white-space: nowrap; font-size: 0.82rem; }
+tr:last-child td { border-bottom: 0; }
+td.n, th.n { font-family: var(--font-mono); font-variant-numeric: tabular-nums; direction: ltr; text-align: left; white-space: nowrap; }
+td .rng { color: var(--ink-3); font-size: 0.8em; }
+td.better { color: var(--good); font-weight: 600; }
+td.worse { color: var(--bad); font-weight: 600; }
+.cap { color: var(--ink-3); font-size: 0.85rem; }
+
+/* change cards */
+.changes { display: grid; gap: 14px; }
+.change { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; display: grid; gap: 12px; min-width: 0; }
+.change-h { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; justify-content: space-between; }
+.change-h .id { font-family: var(--font-mono); color: var(--ink-3); font-size: 0.85rem; }
+.kv { display: grid; grid-template-columns: 7.5em 1fr; gap: 6px 14px; }
+.kv dt { color: var(--ink-3); font-size: 0.88rem; }
+.kv dd { margin: 0; min-width: 0; }
+@media (max-width: 560px) { .kv { grid-template-columns: 1fr; } .kv dt { margin-top: 6px; } }
+
+/* roadmap */
+.road { display: grid; gap: 0; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); overflow: hidden; }
+.road-row { display: grid; grid-template-columns: 2.2em 1fr auto; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); align-items: start; }
+.road-row:last-child { border-bottom: 0; }
+.road-row .step { font-family: var(--font-mono); color: var(--ink-3); padding-top: 2px; }
+.road-row .what { display: grid; gap: 4px; min-width: 0; }
+.road-row .what span { color: var(--ink-2); font-size: 0.9rem; }
+@media (max-width: 560px) { .road-row { grid-template-columns: 2em 1fr; } .road-row .chip { grid-column: 2; justify-self: start; } }
+
+/* problems */
+.probs { display: grid; gap: 10px; counter-reset: p; }
+.prob { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: grid; grid-template-columns: 1fr auto; gap: 6px 14px; }
+.prob h3 { font-size: 1rem; }
+.prob p { grid-column: 1 / -1; color: var(--ink-2); font-size: 0.92rem; }
+@media (max-width: 560px) { .prob { grid-template-columns: 1fr; } }
+
+/* charts */
+.chart { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px; display: grid; gap: 10px; min-width: 0; }
+.chart-h { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px 16px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 0.82rem; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.legend i.line { height: 2px; border-radius: 0; }
+.legend i.dash { height: 0; border-top: 2px dashed var(--chart-ref); width: 16px; border-radius: 0; }
+.svgbox { overflow-x: auto; direction: ltr; position: relative; }
+.svgbox svg { display: block; width: 100%; min-width: 560px; height: auto; }
+.svgbox text { font-family: var(--font-mono); font-size: 11px; fill: var(--ink-2); }
+.svgbox .lbl { font-family: var(--font-body); fill: var(--ink); font-size: 12px; }
+.svgbox .grid { stroke: var(--line); stroke-width: 1; }
+.svgbox .axis { stroke: var(--ink-3); stroke-width: 1; }
+.tip { position: absolute; pointer-events: none; background: var(--ink); color: var(--bg); font-size: 0.8rem; padding: 6px 9px; border-radius: 6px; white-space: nowrap; transform: translate(-50%, calc(-100% - 10px)); z-index: 3; direction: rtl; font-family: var(--font-body); line-height: 1.5; }
+.tip b { font-family: var(--font-mono); font-weight: 600; }
+
+details { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
+details > summary { cursor: pointer; padding: 12px 16px; font-weight: 600; list-style-position: inside; }
+details[open] > summary { border-bottom: 1px solid var(--line); }
+details > .body { padding: 14px 16px; display: grid; gap: 12px; min-width: 0; }
+
+figure { margin: 0; }
+#final img { display: block; max-width: 100%; height: auto; border: 1px solid var(--line); border-radius: 8px; }
+footer { color: var(--ink-3); font-size: 0.85rem; border-top: 1px solid var(--line); }
+footer .wrap { padding-block: 20px 32px; }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <div class="eyebrow">Performance &amp; Caching · Docker Store · آخر تحديث 10 تشرين الثاني 2026</div>
+    <h1>أداء Docker Store</h1>
+    <p class="lede">قياس الأداء قبل التحسين، والتحسينات التي نُفّذت حتى الآن مع أرقامها، وما بقي من الخطة. كل الأرقام مأخوذة من <code>docs/performance.md</code> واختبارات k6 على بيانات بحجم 200 ألف طلب.</p>
+    <div class="chips">
+      <span class="chip done">الخطوة 1: القياس الأساسي مكتمل</span>
+      <span class="chip wip">الخطوة 2: البنود 1 إلى 6 من 7 منجزة (البند 7 اختياري)</span>
+      <span class="chip done">المقارنة النهائية قبل/بعد: منجزة (11 تشرين الثاني)</span>
+    </div>
+  </div>
+</header>
+
+<nav class="index" aria-label="أقسام الصفحة">
+  <div class="wrap">
+    <a href="#summary">الخلاصة</a>
+    <a href="#final">المقارنة النهائية</a>
+    <a href="#before-after">قبل وبعد</a>
+    <a href="#changes">التحسينات المنجزة</a>
+    <a href="#roadmap">الخطة المتبقية</a>
+    <a href="#baseline">القياس الأساسي</a>
+    <a href="#capacity">سقف الجهاز</a>
+    <a href="#problems">المشاكل المرصودة</a>
+    <a href="#behavior">سلوك ملحوظ</a>
+    <a href="#method">طريقة القياس</a>
+    <a href="#environment">البيئة</a>
+  </div>
+</nav>
+
+<main>
+<div class="wrap">
+
+<!-- ============ SUMMARY ============ -->
+<section id="summary">
+  <div class="sec-head">
+    <h2>الخلاصة</h2>
+    <p class="cap">أهم الأرقام في سطر واحد لكل منها.</p>
+  </div>
+  <div class="figs">
+    <div class="fig">
+      <span class="k">p95 عند 120 req/s، قبل → بعد</span>
+      <span class="v">2207 → 63 <small>ms</small></span>
+      <span class="n">قائمة المنتجات. كل الـ endpoints: −93% إلى −97%، وصفر طلبات متأخرة (المقارنة النهائية).</span>
+    </div>
+    <div class="fig">
+      <span class="k">سقف الجهاز (قبل التحسين)</span>
+      <span class="v">~165 <small>req/s</small></span>
+      <span class="n">فوقه تتراكم الطلبات في طابور وينهار زمن الاستجابة.</span>
+    </div>
+    <div class="fig">
+      <span class="k">أعمق صفحة في الكتالوج (SQL)</span>
+      <span class="v">43.96 → 9.96 <small>ms</small></span>
+      <span class="n">بعد إضافة <code>id</code> للـ index وقراءة الصفحة بـ deferred join.</span>
+    </div>
+    <div class="fig">
+      <span class="k">p50 لقائمة المنتجات مع Redis</span>
+      <span class="v">52.5 → 15.3 <small>ms</small></span>
+      <span class="n">عند 100 req/s. الاستعلامات لكل طلب من 2 إلى 0.2، ونسبة الـ hit 70.7%.</span>
+    </div>
+    <div class="fig">
+      <span class="k">بايتات الكتالوج مع ETag</span>
+      <span class="v">31.2 → 14.1 <small>MiB</small></span>
+      <span class="n">60.7% من طلبات الكتالوج أُجيبت بـ 304 بدون جسم (−55% بيانات).</span>
+    </div>
+    <div class="fig">
+      <span class="k">مشاكل N+1 في الـ API</span>
+      <span class="v">0</span>
+      <span class="n">عدد الاستعلامات ثابت لكل endpoint. البنود في القائمة صارت باستعلام واحد للصفحة.</span>
+    </div>
+  </div>
+  <div class="note">
+    <p><strong>أين يذهب الوقت فعلاً:</strong> أغلب استعلامات SQL تنتهي في أقل من 2ms. الوقت الأكبر تكاليف ثابتة في كل طلب: فتح اتصال جديد بـ PostgreSQL (حوالي 11ms) وإقلاع Laravel من جديد (حوالي 13ms). هذا حوالي 25ms من أصل 37ms في <code>GET /products/{id}</code> قبل أي عمل فعلي.</p>
+  </div>
+</section>
+
+<!-- ============ BEFORE / AFTER ============ -->
+<section id="before-after">
+  <div class="sec-head">
+    <span class="eyebrow">docs/performance.md · 6.1 – 6.6</span>
+    <h2>قبل وبعد</h2>
+    <p class="cap">ما قِيس حتى الآن لكل تحسين. المقارنة النهائية الكاملة (40 و120 req/s، ثلاث تشغيلات، الوسيط) ستُقاس في نهاية الخطوة 2 بشكل متتالٍ: الكود الأساسي ثم الكود النهائي في نفس الجلسة.</p>
+  </div>
+
+  <div class="chart" id="explain-chart">
+    <div class="chart-h">
+      <h3>زمن تنفيذ الاستعلامات (EXPLAIN ANALYZE)</h3>
+      <div class="legend" aria-hidden="true">
+        <span><i style="background:var(--stage-0)"></i>قبل</span>
+        <span><i style="background:var(--stage-1)"></i>بعد 6.1 (indexes)</span>
+        <span><i style="background:var(--stage-2)"></i>بعد 6.2 (deferred join)</span>
+      </div>
+    </div>
+    <div class="svgbox" id="explain-svg"></div>
+    <p class="cap">بالميلي ثانية، على بيانات الأداء. Q4 وQ5 لم يتغيرا في 6.2 لأن الـ deferred join طُبّق على الكتالوج فقط. الصفحة الأولى ارتفعت من 0.10 إلى 0.29ms (20 قراءة بالمفتاح الأساسي)، وهذا مهمل.</p>
+  </div>
+
+  <div class="tbl">
+    <table>
+      <thead><tr><th>الاستعلام</th><th class="n">قبل</th><th class="n">بعد 6.1</th><th class="n">بعد 6.2</th><th>ماذا تغيّر في الخطة</th></tr></thead>
+      <tbody>
+        <tr><td>Q1 الصفحة الأولى من الكتالوج</td><td class="n">0.19</td><td class="n">0.10</td><td class="n">0.29</td><td>اختفت خطوة Incremental Sort، ثم صارت قراءة ids فقط ثم 20 قراءة</td></tr>
+        <tr><td>Q2 صفحة عميقة <code>OFFSET 49000</code></td><td class="n">43.96</td><td class="n">28.29</td><td class="n better">9.96</td><td>من ترتيب 49,020 صفاً إلى Index Only Scan بدون قراءة الجدول</td></tr>
+        <tr><td>Q3 الفئة <code>home</code>، صفحة 100</td><td class="n">6.50</td><td class="n">5.69</td><td class="n better">0.73</td><td>من Bitmap scan + top-N heapsort إلى Index Only Scan</td></tr>
+        <tr><td>Q4 طلبات مستخدم ثقيل، صفحة 11</td><td class="n">1.05</td><td class="n better">0.60</td><td class="n">—</td><td>اختفت خطوة Incremental Sort</td></tr>
+        <tr><td>Q5 طلبات الأدمن <code>status=pending</code>، صفحة 50</td><td class="n">3.91</td><td class="n better">2.91</td><td class="n">—</td><td>اختفت خطوة Incremental Sort</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="sub">
+    <h3>القياس السريع تحت الحمل</h3>
+    <p>بعد كل تحسين: إحماء 30 ثانية ثم تشغيل واحد مدته دقيقتان. تشغيل واحد يكفي لرؤية الاتجاه، ولا يكفي لحكم نهائي على الـ p99.</p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Endpoint</th><th class="n">6.2 · p50 / p95 / p99</th><th class="n">6.3 · p50 / p95 / p99</th><th class="n">6.4 Redis · p50 / p95 / p99</th></tr></thead>
+        <tbody>
+          <tr><td><code>GET /products</code></td><td class="n">54.8 / 192.1 / 478.3</td><td class="n">52.5 / 76.3 / 102.6</td><td class="n better">15.3 / 65.8 / 84.9</td></tr>
+          <tr><td><code>GET /products/{id}</code></td><td class="n">39.7 / 146.6 / 448.3</td><td class="n">38.1 / 57.6 / 76.7</td><td class="n">41.5 / 59.7 / 73.3</td></tr>
+          <tr><td><code>GET /orders</code></td><td class="n">38.4 / 118.0 / 385.3</td><td class="n">44.3 / 62.6 / 83.2</td><td class="n">42.3 / 59.9 / 76.3</td></tr>
+          <tr><td><code>GET /orders/{id}</code></td><td class="n">44.1 / 129.4 / 465.6</td><td class="n">42.4 / 61.1 / 83.8</td><td class="n">40.3 / 57.5 / 70.6</td></tr>
+          <tr><td><code>GET /notifications</code></td><td class="n">39.6 / 122.5 / 390.2</td><td class="n">38.0 / 56.2 / 71.4</td><td class="n">36.6 / 52.4 / 65.7</td></tr>
+          <tr><td><code>POST /orders</code></td><td class="n">84.4 / 276.9 / 763.5</td><td class="n">81.2 / 115.1 / 143.3</td><td class="n">80.3 / 111.7 / 132.2</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="cap">عند 100 req/s، جهاز هادئ، 10 تشرين الثاني 2026، بالميلي ثانية. زيادة 6ms في p50 لـ <code>GET /orders</code> بعد 6.3 ليست تراجعاً: الاستجابة صارت تحمل بنود كل طلب (45–60 بنداً للصفحة) بعد أن كانت رؤوس الطلبات فقط، فهي جواب أكبر وليست نفس الطلب أبطأ. عمود 6.4 يبيّن أثر Redis: قائمة المنتجات وحدها تغيّرت بوضوح، والباقي غير مخزّن مؤقتاً. فرق الـ p95/p99 بين التشغيلين ليس من 6.3: التشغيل الأول ارتفعت فيه الأطراف في كل الـ endpoints معاً، حتى التي لم يلمسها التغيير، وهذا توقف مؤقت على مستوى الجهاز.</p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>القياس السريع عند 120 req/s بعد 6.1</th><th class="n">p95 قبل</th><th class="n">p95 بعد</th></tr></thead>
+        <tbody>
+          <tr><td><code>GET /products</code></td><td class="n">133.2 <span class="rng">(100.5–138.5)</span></td><td class="n better">87.5</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="cap">87.5ms أقل من أدنى تشغيل في القياس الأساسي (100.5ms). باقي الـ endpoints بقيت ضمن مدى القياس الأساسي.</p>
+  </div>
+</section>
+
+<!-- ============ FINAL ============ -->
+<section id="final">
+  <div class="sec-head">
+    <span class="eyebrow">docs/performance.md · 6.7</span>
+    <h2>المقارنة النهائية: قبل وبعد في نفس الجلسة</h2>
+    <p class="cap">11 تشرين الثاني 2026. "قبل" = صورة باك إند من commit القياس الأساسي <code>833dc94</code> مع الـ indexes القديمة. "بعد" = الكود الحالي بكل التحسينات. لكل جانب ومعدل: بيانات جديدة، Redis فارغ، إحماء دقيقتين، ثم 3 تشغيلات وأخذ الوسيط. نفس عميل k6 للجانبين.</p>
+  </div>
+
+  <div class="sub">
+    <h3>120 req/s: حمل عالٍ</h3>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Endpoint</th><th class="n">قبل p50 / p95 / p99</th><th class="n">بعد p50 / p95 / p99</th><th class="n">p50</th><th class="n">p95</th></tr></thead>
+        <tbody>
+          <tr><td><code>GET /products</code></td><td class="n">110.7 / 2207.0 / 2647.6</td><td class="n better">17.4 / 63.4 / 106.9</td><td class="n better">−84%</td><td class="n better">−97%</td></tr>
+          <tr><td><code>GET /products/{id}</code></td><td class="n">66.2 / 2129.8 / 2445.2</td><td class="n better">44.9 / 83.1 / 146.0</td><td class="n better">−32%</td><td class="n better">−96%</td></tr>
+          <tr><td><code>GET /orders</code></td><td class="n">61.5 / 2129.5 / 2441.9</td><td class="n better">48.3 / 85.0 / 143.6</td><td class="n better">−21%</td><td class="n better">−96%</td></tr>
+          <tr><td><code>GET /orders/{id}</code></td><td class="n">68.4 / 2086.8 / 2503.9</td><td class="n better">47.5 / 79.4 / 147.2</td><td class="n better">−31%</td><td class="n better">−96%</td></tr>
+          <tr><td><code>GET /notifications</code></td><td class="n">62.7 / 2146.6 / 2475.3</td><td class="n better">42.7 / 73.4 / 136.5</td><td class="n better">−32%</td><td class="n better">−97%</td></tr>
+          <tr><td><code>POST /orders</code></td><td class="n">132.3 / 2253.9 / 2703.6</td><td class="n better">106.7 / 165.3 / 263.2</td><td class="n better">−19%</td><td class="n better">−93%</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul>
+      <li><strong>الكود القديم سقط في الطابور في تشغيلين من ثلاثة</strong> (p95 فوق ثانيتين، وحتى 103 طلبات متأخرة). الجديد بقي مستقراً: p95 بين 60 و92ms، وصفر طلبات متأخرة. وحتى مقارنة بأفضل تشغيل قديم، p95 الجديد حوالي الثلث.</li>
+      <li><strong>السبب:</strong> القديم عند 120 على حافة الجهاز. كل طلب كتالوج يعدّ كل المنتجات ويقرأ الصفحات العميقة ويستدعي المخزون. الجديد يجيب أغلب طلبات الكتالوج من Redis، و60% منها بـ 304 بدون جسم، فنفس الحمل يكلّف معالجاً أقل بكثير، والهامش يمتص أي توقف قصير.</li>
+    </ul>
+    <figure><img src="docs/proofs/screenshots/perf/final-120-before-after.png" alt="120 req/s before vs after" loading="lazy"></figure>
+  </div>
+
+  <div class="sub">
+    <h3>40 req/s: حمل عادي</h3>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Endpoint</th><th class="n">قبل p50 / p95 / p99</th><th class="n">بعد p50 / p95 / p99</th><th class="n">p50</th><th class="n">p95</th></tr></thead>
+        <tbody>
+          <tr><td><code>GET /products</code></td><td class="n">46.8 / 104.9 / 131.1</td><td class="n better">18.3 / 65.9 / 99.9</td><td class="n better">−61%</td><td class="n better">−37%</td></tr>
+          <tr><td><code>GET /products/{id}</code></td><td class="n">36.0 / 66.9 / 88.3</td><td class="n worse">45.7 / 79.4 / 105.2</td><td class="n worse">+27%</td><td class="n worse">+19%</td></tr>
+          <tr><td><code>GET /orders</code></td><td class="n">32.8 / 67.6 / 86.4</td><td class="n worse">45.0 / 83.0 / 110.8</td><td class="n worse">+37%</td><td class="n worse">+23%</td></tr>
+          <tr><td><code>GET /orders/{id}</code></td><td class="n">41.2 / 79.3 / 100.4</td><td class="n worse">49.6 / 86.2 / 112.2</td><td class="n worse">+21%</td><td class="n worse">+9%</td></tr>
+          <tr><td><code>GET /notifications</code></td><td class="n">37.1 / 72.2 / 87.3</td><td class="n worse">44.9 / 79.4 / 102.5</td><td class="n worse">+21%</td><td class="n worse">+10%</td></tr>
+          <tr><td><code>POST /orders</code></td><td class="n">80.9 / 130.2 / 147.4</td><td class="n worse">106.3 / 158.8 / 180.3</td><td class="n worse">+31%</td><td class="n worse">+22%</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note warn">
+      <p><strong>تحت الحمل العادي الكتالوج أسرع بكثير، والـ endpoints الأخرى أبطأ بـ 8–25ms.</strong> هذه كلفة حقيقية، وأسبابها:</p>
+      <ul>
+        <li><strong>اتصالات أكثر في كل طلب:</strong> PHP في الوضع الكلاسيكي يفتح اتصالاته من الصفر مع كل طلب. الآن يفتح Redis والـ replica، والطلب الذي يكتب يفتح الأساسي أيضاً. <code>POST /orders</code> يقرأ من الـ replica ثم يكتب على الأساسي: اتصالان بدل واحد (~13ms لكل منهما). والقراءات المسجّلة تدفع قرار التوجيه (~3ms).</li>
+        <li><strong>الـ miss في الكاش أغلى من عدم وجود كاش:</strong> تفاصيل المنتج عشوائية من 50,000، فحوالي 95% misses، وكل miss يضيف رحلات Redis قبل وبعد نفس قراءة القاعدة. الحركة الحقيقية تتركز على المنتجات الشائعة، فنسبة الـ hit فيها أعلى بكثير.</li>
+        <li><strong><code>GET /orders</code> يرجع بيانات أكثر</strong> (البنود، 6.3): جواب أكبر وليس نفس الجواب أبطأ.</li>
+        <li><strong>عند 40 كان للقديم هامش كبير</strong>، فلم يدخل في طابور أبداً، والتوفير في المعالج الذي يصنع الفرق عند 120 لا يظهر هنا في زمن الاستجابة.</li>
+      </ul>
+      <p><strong>ما يزيل معظم هذه الكلفة:</strong> FrankenPHP worker mode (البند 7، اختياري)، الذي يبقي التطبيق واتصالاته بـ PostgreSQL وRedis مفتوحة بين الطلبات.</p>
+    </div>
+    <figure><img src="docs/proofs/screenshots/perf/final-40-before-after.png" alt="40 req/s before vs after" loading="lazy"></figure>
+  </div>
+
+  <details>
+    <summary>لقطات من تشغيل واحد لكل جانب، ومن سكربتات الإثبات</summary>
+    <div class="body">
+      <p class="cap">قبل، 120 req/s</p><img src="docs/proofs/screenshots/perf/k6-before-120-run2.png" alt="before 120" loading="lazy">
+      <p class="cap">بعد، 120 req/s</p><img src="docs/proofs/screenshots/perf/k6-after-120-run2.png" alt="after 120" loading="lazy">
+      <p class="cap">قبل، 40 req/s</p><img src="docs/proofs/screenshots/perf/k6-before-40-run2.png" alt="before 40" loading="lazy">
+      <p class="cap">بعد، 40 req/s</p><img src="docs/proofs/screenshots/perf/k6-after-40-run2.png" alt="after 40" loading="lazy">
+      <p class="cap">إثبات ETag (9/9)</p><img src="docs/proofs/screenshots/perf/proof-etag-freshness.png" alt="ETag proof" loading="lazy">
+      <p class="cap">إثبات read-your-writes مع تأخير 3 ثوانٍ (10/10)</p><img src="docs/proofs/screenshots/perf/proof-replica-read-your-writes.png" alt="replica proof" loading="lazy">
+    </div>
+  </details>
+</section>
+
+<!-- ============ CHANGES ============ -->
+<section id="changes">
+  <div class="sec-head">
+    <span class="eyebrow">Step 2 · done</span>
+    <h2>التحسينات المنجزة</h2>
+  </div>
+  <div class="changes">
+
+    <article class="change">
+      <div class="change-h"><h3>إضافة <code>id</code> إلى indexes القوائم</h3><span class="id">6.1 · migration 0001_01_03_000001</span></div>
+      <dl class="kv">
+        <dt>المشكلة</dt><dd>كل القوائم مرتبة بـ <code>(created_at DESC, id DESC)</code>، والـ indexes كانت تغطي <code>created_at</code> فقط. فكان PostgreSQL يضيف خطوة Incremental Sort ويرتب كل صف يتخطاه الـ <code>OFFSET</code>.</dd>
+        <dt>الحل</dt><dd>استبدال أربعة indexes بنسخ فيها <code>id</code>:</dd>
+      </dl>
+      <div class="tbl">
+        <table>
+          <thead><tr><th>القديم</th><th>الجديد</th></tr></thead>
+          <tbody>
+            <tr><td><code>products (created_at DESC)</code></td><td><code>products (created_at DESC, id DESC)</code></td></tr>
+            <tr><td><code>products (category, created_at DESC)</code></td><td><code>products (category, created_at DESC, id DESC)</code></td></tr>
+            <tr><td><code>orders (user_id, created_at DESC)</code></td><td><code>orders (user_id, created_at DESC, id DESC)</code></td></tr>
+            <tr><td><code>orders (status, created_at DESC)</code></td><td><code>orders (status, created_at DESC, id DESC)</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <dl class="kv">
+        <dt>النتيجة</dt><dd>الصفحة العميقة 43.96 → 28.29ms، وطلبات المستخدم 1.05 → 0.60ms. قائمة المنتجات عند 120 req/s: p95 من 133.2 إلى 87.5ms.</dd>
+        <dt>ملاحظة</dt><dd><code>CREATE INDEX</code> العادي يأخذ أجزاء من الثانية هنا. على جدول كبير في production يُبنى بـ <code>CREATE INDEX CONCURRENTLY</code> خارج transaction.</dd>
+      </dl>
+      <details>
+        <summary>خطة Q2 قبل وبعد</summary>
+        <div class="body">
+<pre>-- قبل
+Limit (actual time=43.892..43.896 rows=20 loops=1)
+  -&gt;  Incremental Sort (actual time=0.154..42.262 rows=49020 loops=1)
+        Sort Key: created_at DESC, id DESC
+        Presorted Key: created_at
+        Full-sort Groups: 1532  Sort Method: quicksort
+        -&gt;  Index Scan using idx_products_created on products (actual time=0.080..28.869 rows=49021 loops=1)
+Execution Time: 43.958 ms
+
+-- بعد
+Limit (actual time=28.222..28.232 rows=20 loops=1)
+  -&gt;  Index Scan using idx_products_created_id on products (actual time=0.015..26.440 rows=49020 loops=1)
+Execution Time: 28.285 ms</pre>
+        </div>
+      </details>
+    </article>
+
+    <article class="change">
+      <div class="change-h"><h3>قراءة صفحات الكتالوج بـ deferred join</h3><span class="id">6.2 · ProductsRepository::list</span></div>
+      <dl class="kv">
+        <dt>المشكلة</dt><dd>بعد الـ index اختفى الترتيب، لكن الصفحة العميقة ما زالت تقرأ 49,020 صفاً كاملاً من الجدول ثم ترمي أغلبها.</dd>
+        <dt>الحل</dt><dd>اختيار الـ 20 id أولاً بمسح للـ index فقط، ثم قراءة هذه الصفوف فقط. الـ API والترتيب لم يتغيرا، وتحققت من ذلك على الصفحات 1 و3 و100 و2,451، مع فئة وبدونها.</dd>
+        <dt>النتيجة</dt><dd>الصفحة العميقة 28.29 → <strong>9.96ms</strong>، وصفحة الفئة 5.69 → <strong>0.73ms</strong>.</dd>
+        <dt>حدود</dt><dd><code>Heap Fetches: 0</code> يعتمد على أن الـ visibility map محدّث (autovacuum يحدّثه). على جدول فيه تعديلات كثيرة حديثة يقل المكسب.</dd>
+      </dl>
+<pre>SELECT p.* FROM (SELECT id, created_at FROM products [WHERE category = ?]
+                  ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?) page
+JOIN products p ON p.id = page.id
+ORDER BY page.created_at DESC, page.id DESC</pre>
+      <details>
+        <summary>خطة Q2 بعد 6.2</summary>
+        <div class="body">
+<pre>Nested Loop (actual time=9.224..9.837 rows=20 loops=1)
+  -&gt;  Limit
+        -&gt;  Index Only Scan using idx_products_created_id on products (actual time=0.020..6.702 rows=49020 loops=1)
+              Heap Fetches: 0
+  -&gt;  Index Scan using products_pkey on products p (actual time=0.030..0.030 rows=1 loops=20)
+        Index Cond: (id = products.id)
+Execution Time: 9.956 ms</pre>
+        </div>
+      </details>
+    </article>
+
+    <article class="change">
+      <div class="change-h"><h3>البنود في <code>GET /orders</code> باستعلام واحد للصفحة</h3><span class="id">6.3 · OrdersRepository::findItemsForOrders</span></div>
+      <dl class="kv">
+        <dt>ما وجدناه</dt><dd><strong>لم يكن هناك N+1 في الـ API.</strong> عدد الاستعلامات ثابت لكل endpoint، ولا يوجد استعلام داخل حلقة في أي service. الاستثناء الوحيد <code>flushOutbox</code>، وهو يرسل release لكل حجز عن قصد (عبر الـ scheduler فقط).</dd>
+        <dt>المشكلة</dt><dd>صفحة الطلبات في الواجهة تعرض عدد البنود (<code>o.items.length</code>)، و<code>GET /orders</code> لم يكن يرجع البنود، فكان العمود يعرض "—" دائماً. الحل البسيط، أي <code>findItems()</code> لكل طلب، كان سيصنع N+1 حقيقياً: 20 استعلاماً إضافياً لكل صفحة.</dd>
+        <dt>الحل</dt><dd>استعلام واحد <code>WHERE order_id = ANY(?::uuid[])</code> لكل بنود الصفحة، ثم تجميعها حسب الطلب في PHP. الاستجابة صار فيها <code>items</code> لكل طلب، وأُضيف schema <code>OrderListEntry</code> في <code>openapi.yaml</code>.</dd>
+        <dt>الإثبات</dt><dd><code>OrderListItemsTest</code>: 3 استعلامات لصفحة فيها طلبان، و3 لصفحة فيها 20 طلباً، و2 لصفحة فارغة.</dd>
+        <dt>+6ms ليست تراجعاً</dt><dd>قبل 6.3 كان <code>GET /orders</code> يرجع 20 رأس طلب فقط، والآن يرجع نفس الطلبات <strong>ومعها بنودها</strong> (45–60 بنداً للصفحة)، وهي بيانات تحتاجها الصفحة ولم تكن تصلها. الزيادة في p50 (+6ms) هي استعلام إضافي (0.23ms من SQL) واستجابة JSON أكبر. نفس البيانات بالطريقة البسيطة كانت ستكلّف 20 استعلاماً إضافياً لكل صفحة.</dd>
+      </dl>
+      <details>
+        <summary>خطة استعلام البنود</summary>
+        <div class="body">
+<pre>Incremental Sort (actual time=1.008..1.072 rows=45 loops=1)
+  Sort Key: order_items.order_id, order_items.product_name
+  Presorted Key: order_items.order_id
+  -&gt;  Index Scan using order_items_order_id_product_id_key on order_items (actual time=0.757..0.985 rows=45 loops=1)
+        Index Cond: (order_id = ANY ($0))
+        Buffers: shared hit=108
+Execution Time: 1.186 ms   (of which the items lookup: ~0.23 ms)</pre>
+        </div>
+      </details>
+    </article>
+
+    <article class="change">
+      <div class="change-h"><h3>Redis cache للكتالوج</h3><span class="id">6.4 · ProductsCache</span></div>
+      <dl class="kv">
+        <dt>المشكلة</dt><dd>الكتالوج وصفحة المنتج عامة ومتطابقة لكل زائر، لكنها كانت تُبنى من قاعدة البيانات وخدمة المخزون في كل طلب: <code>COUNT(*)</code> لكل المنتجات (10.9ms) واستدعاء gRPC في كل طلب.</dd>
+        <dt>الإعداد</dt><dd>خدمة <code>redis:7.4-alpine</code> بدون حفظ على القرص (البيانات قابلة للفقد)، وحد ذاكرة 256MB مع <code>volatile-lru</code>: عند امتلاء الذاكرة يُحذف فقط ما له TTL، فمفتاح الإصدار لا يُحذف أبداً. اتصال Redis خاص بالكاش بمهلة 0.3 ثانية <strong>وبدون إعادة محاولة</strong>، لأن الإعداد الافتراضي يعيد المحاولة 3 مرات ويضيف حتى ثانية لكل طلب عند توقف Redis.</dd>
+        <dt>أين الكود</dt><dd>كله داخل وحدة المنتجات: <code>ProductsCache</code> يستخدمه <code>ProductsService</code> فقط. وحدة الطلبات تبلّغ عن تغيّر المخزون عبر <code>ProductsModule::stockChanged()</code>. القيم المخزّنة arrays عادية.</dd>
+      </dl>
+      <div class="tbl">
+        <table>
+          <thead><tr><th>البيانات</th><th>تُخزَّن؟</th><th>لماذا</th><th>المدة</th><th>متى تُلغى</th></tr></thead>
+          <tbody>
+            <tr><td>تفاصيل المنتج (بدون المخزون)</td><td><strong>نعم</strong></td><td>أكثر عنصر يُقرأ، ونفسه لكل زائر</td><td class="n">10 / 20 min</td><td>بعد commit تعديل المنتج</td></tr>
+            <tr><td>صفحات الكتالوج</td><td><strong>نعم</strong></td><td>عامة ونفسها لكل الأدوار، والصفحات الأولى تأخذ أغلب الحركة</td><td class="n">2 / 10 min</td><td><code>INCR</code> لرقم الإصدار بعد commit أي إنشاء أو تعديل</td></tr>
+            <tr><td><code>COUNT(*)</code> لكل فئة</td><td><strong>نعم</strong></td><td>10.9ms في كل طلب فقط لرقم الإجمالي</td><td class="n">2 / 10 min</td><td>نفس رقم الإصدار</td></tr>
+            <tr><td>المخزون للعرض</td><td><strong>للعرض فقط</strong></td><td>استدعاء <code>GetStock</code> في كل طلب</td><td class="n">5 s</td><td>بعد AdjustStock وبعد كل حجز وكل إرجاع</td></tr>
+            <tr><td>رقم إصدار الكتالوج</td><td>بدون TTL</td><td>لو انتهت صلاحيته لعادت مفاتيح الصفحات القديمة</td><td class="n">—</td><td><code>INCR</code> ذري</td></tr>
+            <tr><td>الأسعار عند إنشاء الطلب</td><td class="worse">أبداً</td><td>الطلب يجب أن يأخذ سعر قاعدة البيانات في تلك اللحظة</td><td class="n">—</td><td>—</td></tr>
+            <tr><td>المخزون عند الحجز</td><td class="worse">أبداً</td><td>الحجز يذهب دائماً إلى <code>ReserveStock</code> الحقيقي</td><td class="n">—</td><td>—</td></tr>
+            <tr><td>تسجيل الدخول والـ JWT والمستخدمون</td><td class="worse">أبداً</td><td>بيانات أمنية، والدور المخزّن قد يبقى بعد تغييره</td><td class="n">—</td><td>—</td></tr>
+            <tr><td>الطلبات والإشعارات</td><td class="worse">أبداً</td><td>خاصة بكل مستخدم وتتغير مع كل فعل، وإعادة استخدامها قليلة</td><td class="n">—</td><td>—</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="cap">المدة "10 / 20 min" تعني: طازج 10 دقائق، ثم يُعرض القديم حتى 20 دقيقة بينما يُحدَّث في الخلفية.</p>
+      <dl class="kv">
+        <dt>المفاتيح</dt><dd>كل مدخل يغيّر النتيجة موجود في المفتاح: الفئة، والـ limit، والصفحة، ورقم الإصدار. القيم تُطبَّع بعد التحقق، فـ <code>?page=01</code> وغياب <code>page</code> و<code> Home </code> و<code>home</code> والمعاملات المجهولة مثل <code>?utm=x</code> كلها تشترك في نفس المفتاح. لا يوجد دور في المفتاح لأن الكتالوج نفسه لكل الأدوار. الـ API ليس فيه sort أو search، وإذا أُضيفا يجب أن يدخلا المفتاح.</dd>
+        <dt>بعد الـ commit</dt><dd>الإلغاء عبر <code>DB::afterCommit</code>: داخل transaction ينتظر الـ commit، والـ rollback يلغيه. الإلغاء قبل الـ commit كان سيسمح لطلب آخر بقراءة الصف القديم وتخزينه من جديد. وأثناء أي transaction يتجاوز الكاش Redis تماماً، فلا تُخزَّن بيانات قد تُلغى.</dd>
+        <dt>صورة المنتج</dt><dd>لا يوجد endpoint منفصل لرفع الصورة، فهي تُرسل مع <code>POST /products</code>. إنشاء أي منتج يرفع رقم الإصدار بعد الـ commit، فيظهر المنتج وصورته فوراً.</dd>
+        <dt>تأخر المخزون</dt><dd>المخزون المعروض قد يتأخر حتى 5 ثوانٍ في حالتين: سباق بين قراءة قديمة والإلغاء، وحجز انتهت مهلته ثم أُرجع من الـ outbox دون معرفة منتجاته. الحجز نفسه يُفحص دائماً عند خدمة المخزون.</dd>
+        <dt>Stampede</dt><dd><code>Cache::flexible</code> عند انتهاء الصلاحية: الكل يأخذ النسخة القديمة فوراً، وطلب واحد يحدّثها بعد إرسال الاستجابة. وقفل (<code>lock</code>) عند الغياب التام: بعد كل تعديل تصبح كل مفاتيح الصفحات جديدة، فيحسب طلب واحد وينتظر الباقون حتى 3 ثوانٍ. <code>flexible</code> وحده يترك كل الطلبات تضرب القاعدة بعد كل تعديل، والقفل وحده يجعل الكل ينتظر عند كل انتهاء صلاحية.</dd>
+        <dt>إذا توقف Redis</dt><dd>200 من قاعدة البيانات مع تحذير واحد في الـ log لكل طلب. جُرّب فعلياً بإيقاف الحاوية: أول طلب أخذ 1.34 ثانية (فشل تحليل اسم الحاوية)، ثم حوالي 100ms بدل 50. حل لاحق محتمل: circuit breaker يتجاوز Redis لثوانٍ بعد أي فشل.</dd>
+      </dl>
+      <div class="tbl">
+        <table>
+          <thead><tr><th>عند 100 req/s</th><th class="n">p50 قبل → بعد</th><th class="n">استعلامات/طلب</th><th class="n">نسبة الـ hit</th></tr></thead>
+          <tbody>
+            <tr><td><code>GET /products</code></td><td class="n better">52.5 → 15.3 ms</td><td class="n">2 → 0.2</td><td class="n">70.7%</td></tr>
+            <tr><td><code>GET /products/{id}</code></td><td class="n">38.1 → 41.5 ms</td><td class="n">1 → 0.9</td><td class="n">5.5%</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <ul>
+        <li><strong>الكتالوج أسرع 3.4 مرة في p50:</strong> أغلب الطلبات لا تلمس PostgreSQL ولا خدمة المخزون. ما بقي هو إقلاع Laravel ورحلات Redis.</li>
+        <li><strong>تفاصيل المنتج لم تتحسن بسبب طريقة الاختبار:</strong> k6 يختار منتجاً عشوائياً من 50,000، فنادراً ما يُطلب نفس المنتج مرتين خلال صلاحيته. الحركة الحقيقية تتركز على المنتجات الشائعة. لم أغيّر السيناريو حتى تبقى المقارنات عادلة.</li>
+        <li><strong>تعريف النسبة:</strong> عمليات البحث التي أجاب عنها Redis من كل عمليات البحث. صفحة الكتالوج فيها حتى 22 عملية (الصفحة، العدد، و20 مخزوناً بصلاحية 5 ثوانٍ)، فنسبة الصفحة والعدد وحدهما أعلى من 70.7%. عدّادات Redis نفسها أعطت 58.9%، لكنها تشمل مفاتيح Laravel الداخلية.</li>
+        <li><strong>الاختبارات:</strong> التعديل يظهر فوراً، والتعديل الملغى لا يترك بيانات قديمة ولا يرفع الإصدار، والطلبات المتكافئة تشترك في مفتاح (صفر استعلامات)، والمخزون يُلغى بعد الحجز والإرجاع، والمنتج الجديد يظهر فوراً، والـ API يعمل عند توقف Redis.</li>
+      </ul>
+    </article>
+
+    <article class="change">
+      <div class="change-h"><h3>HTTP caching بـ ETag و304</h3><span class="id">6.5 · ETagRevalidation</span></div>
+      <dl class="kv">
+        <dt>النطاق</dt><dd><code>GET /products</code> و<code>GET /products/{id}</code> فقط (ومعهما <code>HEAD</code>).</dd>
+        <dt>السلوك</dt><dd>الـ 200 يأخذ <code>ETag</code> و<code>Cache-Control: no-cache, public</code>: العميل يحتفظ بنسخة لكن يسأل في كل مرة، فيظهر أي تعديل في الطلب التالي مباشرة. <strong>بدون <code>max-age</code></strong>، لأنه كان سيجعل العميل يعيد استخدام نسخته دون أن يسأل. إذا تطابق <code>If-None-Match</code> يرجع <code>304</code> بجسم فارغ ونفس الـ headers. المطابقة حسب RFC 9110: قائمة قيم، و<code>*</code>، والمقارنة الضعيفة (<code>W/"x"</code> يطابق <code>"x"</code>).</dd>
+        <dt>لماذا public</dt><dd>الاستجابة نفسها لكل مستخدم، وSymfony يضيف <code>private</code> تلقائياً لأي <code>Cache-Control</code> لا يذكر أحدهما، فلا يمكن إرسال <code>no-cache</code> وحده. ولا حاجة لـ <code>Vary: Authorization</code> لأن الـ endpointين لا يقرآن المستخدم ولا دوره.</dd>
+        <dt>الأخطاء</dt><dd>400 و404 و5xx والكتابة لا تأخذ ETag، والـ 304 لا يحل محل خطأ أبداً: <code>If-None-Match: *</code> على منتج غير موجود يبقى 404.</dd>
+        <dt>HEAD</dt><dd>Laravel يفرّغ جسم HEAD قبل الـ middleware، فكان الـ ETag يُحسب على نص فارغ. اكتشفه اختبار، والحل: بناء الاستجابة كـ GET ثم حذف الجسم.</dd>
+      </dl>
+      <div class="note">
+        <p><strong>طريقة حساب الـ ETag: hash لجسم الاستجابة النهائي (xxh128).</strong> صحيح بالبناء: أي تغيير في أي حقل يغيّر البايتات فيغيّر الـ ETag، بما فيها <code>stock</code> و<code>stock_status</code> والصفحة والفئة. البديل المبني على الإصدارات يحتاج سرد كل مدخلات الاستجابة، وأي مدخل منسي يعني 304 خاطئاً وبيانات قديمة على الشاشة. حساب الـ hash لـ 10KB يأخذ ميكروثوانٍ.</p>
+      </div>
+      <dl class="kv">
+        <dt>ماذا يوفّر 304</dt><dd>الخادم يعمل نفس العمل (إقلاع Laravel، Redis، بناء JSON، الـ hash). الـ 304 يوفّر <strong>نقل الجسم</strong> (صفحة الكتالوج حوالي 10KB، والـ 304 بضع مئات من البايتات) و<strong>عمل العميل</strong> (قراءة JSON وإعادة الرسم). على شبكة بطيئة هذا معظم وقت الانتظار. في اختبارنا k6 على نفس الجهاز، فالشبكة شبه مجانية.</dd>
+        <dt>ما بين الطرفين</dt><dd>لا ضغط في الطريق: Caddy بدون <code>encode</code> وnginx بدون <code>gzip</code>، والـ ETag يبقى قوياً حتى مع <code>Accept-Encoding: gzip</code>. عبر nginx (<code>:8080</code>) يمر الـ ETag والـ 304 بدون تغيير. لا CORS لأن الواجهة على نفس الـ origin، والمتصفح يتحقق بنفسه.</dd>
+        <dt>إصلاح nginx</dt><dd>كان nginx يحفظ عنوان الباك إند عند الإقلاع، فيعطي 502 بعد إعادة إنشاء حاوية الباك إند. صار يعيد تحليل الاسم عبر DNS الخاص بـ Docker عند كل طلب (commit منفصل <code>4aa764c</code>).</dd>
+      </dl>
+      <details>
+        <summary>إثبات أن التعديل يظهر فوراً (docs/proofs/etag-freshness.js)</summary>
+        <div class="body">
+<pre>1. First read
+   GET: 200  ETag "680adaafd2894057349731131badd5ba"  Cache-Control "no-cache, public"  body 265 B  price 19.99, stock 496
+2. Same request with If-None-Match: &lt;that ETag&gt;
+   GET: 304  ETag "680adaafd2894057349731131badd5ba"  body 0 B
+3. Admin changes the price 19.99 -&gt; 20.99 and adds 5 to the stock
+   PATCH price: 200, PATCH stock: 200
+4. Immediately: GET with the OLD ETag
+   GET: 200  ETag "d99f808a9edd7dd52d077d35cf2a1c02"  body 265 B  price 20.99, stock 501
+5. GET with the NEW ETag
+   GET: 304  ETag "d99f808a9edd7dd52d077d35cf2a1c02"  body 0 B
+6. Put the product back
+ALL CHECKS PASSED (9 checks)</pre>
+          <p>التعديل يظهر في أول طلب بعده، حتى لعميل يحمل الـ ETag القديم: Redis يُلغى بعد الـ commit (6.4)، فيتغيّر الجسم، فيتغيّر الـ ETag، فلا يتطابق القديم.</p>
+        </div>
+      </details>
+      <div class="tbl">
+        <table>
+          <thead><tr><th>عند 100 req/s، تشغيلان متتاليان</th><th class="n">بدون If-None-Match</th><th class="n">مع If-None-Match</th></tr></thead>
+          <tbody>
+            <tr><td><code>GET /products</code> p50 / p95 / p99</td><td class="n">15.6 / 67.6 / 93.8</td><td class="n better">14.0 / 57.3 / 67.9</td></tr>
+            <tr><td>نسبة 304 في الكتالوج</td><td class="n">—</td><td class="n better">60.7%</td></tr>
+            <tr><td>الكتالوج: 200 مقابل 304 (p50 / p95 / p99)</td><td class="n">200: 15.6 / 67.6 / 93.8</td><td class="n">200: 27.0 / 63.0 / 76.2 · 304: 12.7 / 23.3 / 30.3</td></tr>
+            <tr><td>بايتات الكتالوج المستلمة</td><td class="n">31.19 MiB</td><td class="n better">14.12 MiB (−55%)</td></tr>
+            <tr><td><code>GET /products/{id}</code> p50 / p95 / p99</td><td class="n">42.1 / 66.7 / 100.6</td><td class="n">38.7 / 52.6 / 66.8</td></tr>
+            <tr><td>نسبة 304 في تفاصيل المنتج</td><td class="n">—</td><td class="n">0.0%</td></tr>
+            <tr><td>كل البيانات المستلمة (مع الـ setup)</td><td class="n">79.6 MiB</td><td class="n">62.9 MiB (−21%)</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <ul>
+        <li><strong>المكسب الواضح هو البايتات:</strong> 60.7% من طلبات الكتالوج أُجيبت بـ 304، وبيانات الكتالوج نزلت 55%.</li>
+        <li><strong>عمود الـ 200 في التشغيل الثاني لا يُقارن بالأول</strong> (27.0 مقابل 15.6ms): الطلبات التي بقيت 200 هي في الغالب صفحات عميقة تُرى لأول مرة وهي أيضاً غائبة عن Redis، والزيارات المتكررة السريعة انتقلت إلى عمود الـ 304.</li>
+        <li><strong>تفاصيل المنتج لا تستفيد في هذا الاختبار:</strong> المنتج عشوائي من 50,000، فنادراً ما يُطلب مرتين، والـ 304 يحتاج نسخة سابقة.</li>
+        <li><strong>الـ endpoints الأخرى أسرع أيضاً بـ 2–4ms</strong> رغم أنها لا تستخدم ETag: هذا تذبذب بين التشغيلات. المؤكد هو البايتات ونسبة الـ 304، أما فروق p95/p99 في تشغيل واحد فليست حاسمة.</li>
+        <li><strong>الـ VUs تتحقق أكثر من المتصفحات:</strong> كل VU يرسل آلاف الطلبات ويحتفظ بالـ ETags طوال التشغيل، فنسبة 60.7% حد أعلى للزيارات المتكررة.</li>
+      </ul>
+    </article>
+
+    <article class="change">
+      <div class="change-h"><h3>Read replica وقراءة ما كتبه المستخدم فوراً</h3><span class="id">6.6 · ReadRouter · RecordWrites</span></div>
+      <dl class="kv">
+        <dt>البنية</dt><dd><code>db</code> هو الأساسي، و<code>db_replica</code> نسخة للقراءة فقط بـ streaming replication، بصورة <code>postgres</code> الرسمية فقط. ملف <code>pg_hba</code> مركّب من المستودع (يعمل حتى على الـ volume الموجود)، وreplication slot مع <code>max_slot_wal_keep_size=1GB</code> حتى لا تملأ replica متوقفة القرص. بيانات الدخول من <code>.env</code> ولا تُحفظ في git.</dd>
+        <dt>Laravel</dt><dd><code>read</code> إلى الـ replica، و<code>write</code> إلى الأساسي، و<code>sticky</code>. القراءة داخل transaction وبعد كتابة في نفس الطلب تذهب للأساسي تلقائياً (تحقّقت باختبار). الـ migrations والـ seeders والـ scheduler والـ outbox و<code>perf:seed</code> على الأساسي فقط.</dd>
+        <dt>Read-your-writes</dt><dd>بعد أي كتابة ناجحة من مستخدم، يخزّن <code>RecordWrites</code> موضع الـ WAL الحالي للأساسي (<code>pg_current_wal_lsn()</code>) لهذا المستخدم في Redis، <strong>قبل</strong> إرسال الاستجابة لا بعدها. قراءات هذا المستخدم تذهب للـ replica فقط إذا كانت قد وصلت لذلك الموضع. اخترت LSN بدل نافذة زمنية لأنه صحيح مهما طال التأخير.</dd>
+        <dt>تكلفة القرار</dt><dd>موضع الـ replica يُقرأ مرة كل 200ms كحد أقصى، مشتركاً بين كل الطلبات، وليس مع كل طلب.</dd>
+        <dt>عند أي شك</dt><dd>الـ replica متوقفة، أو تأخيرها فوق 5 ثوانٍ، أو Redis متوقف: القراءة من الأساسي مع تحذير في الـ log، ولا 500 أبداً. بعد فشل الاتصال بالـ replica تتجاوزها كل الطلبات 10 ثوانٍ.</dd>
+        <dt>حدود الضمان</dt><dd>الضمان يغطي كتابات المستخدم <strong>نفسه</strong>. كتابات الآخرين (مثلاً الأدمن يغيّر حالة طلب) تصل بعد تأخير النسخ (eventual consistency): في القياس كان تأخير النسخ <strong>2.2ms</strong> (الوسيط)، وبحد أقصى 14.8ms.</dd>
+      </dl>
+      <div class="note warn">
+        <p><strong>فخ الكاش مع الـ replica:</strong> بعد تعديل منتج يُلغى الكاش. لو أُعيد ملؤه من replica لم تصلها الكتابة بعد، لخُزّنت البيانات القديمة 10 دقائق. الحل: نخزّن موضع آخر كتابة على المنتجات، وإعادة الملء تقرأ من الـ replica فقط إذا تجاوزته، وإلا فمن الأساسي. ولتفاصيل المنتج: write-through، أي أن المنتج المعدّل يُكتب في الكاش مباشرة من الأساسي فلا تبقى فجوة. في القياس ذهبت كل عمليات إعادة الملء (711) إلى الـ replica، لأنه لم يُعدَّل أي منتج أثناء التشغيل.</p>
+      </div>
+      <div class="note bad">
+        <p><strong>خطأ كشفه الـ replica:</strong> خمس عمليات كتابة كانت تستخدم <code>DB::select</code> مع <code>INSERT/UPDATE ... RETURNING</code>. Laravel يعتبرها قراءة، فأرسل تعديل المنتج إلى الـ replica فرُفض (<code>read-only transaction</code>). صارت تمر عبر <code>Sql::returning()</code> على الأساسي، واختبار معماري يمنع عودة الخطأ. سكربت الإثبات هو من كشفه.</p>
+      </div>
+      <details>
+        <summary>إثبات أن المستخدم يرى ما كتبه (docs/proofs/replica-read-your-writes.js، تأخير 3 ثوانٍ)</summary>
+        <div class="body">
+<pre>1. Customer creates an order, then reads it back at once
+   PASS  order created  (201)
+   PASS  GET /orders shows it  (200, 48 ms, reads: primary)
+   PASS  GET /orders/{id} shows it  (200, 47 ms, reads: primary)
+2. The same order read directly on the replica, right now
+   PASS  the replica does NOT have it yet (the lag is real)  (count = 0)
+   PASS  after 3500 ms the replica has it  (count = 1)
+3. Admin edits a product, then it is read at once
+   PASS  price 20.99 -&gt; 21.99 accepted
+   PASS  GET /products/{id} with the old ETag: 200, not 304  (200, reads: none)
+   PASS  it shows the new price at once  (21.99)
+   PASS  with a new ETag
+   PASS  while the replica itself still has the old price  (replica: 20.99)
+ALL CHECKS PASSED (10 checks)</pre>
+          <p><code>reads: none</code> في الخطوة 3: المنتج جاء من Redis (write-through) ولم تُقرأ أي قاعدة بيانات.</p>
+        </div>
+      </details>
+      <div class="tbl">
+        <table>
+          <thead><tr><th>عند 100 req/s، p50 / p95 / p99</th><th class="n">A: بدون replica</th><th class="n">B: مع replica</th></tr></thead>
+          <tbody>
+            <tr><td><code>GET /products</code></td><td class="n">14.9 / 64.8 / 88.5</td><td class="n">14.7 / 62.4 / 81.2</td></tr>
+            <tr><td><code>GET /products/{id}</code></td><td class="n">39.8 / 59.2 / 96.2</td><td class="n">41.3 / 62.0 / 101.2</td></tr>
+            <tr><td><code>GET /orders</code></td><td class="n">39.5 / 58.6 / 92.5</td><td class="n">42.5 / 64.2 / 101.9</td></tr>
+            <tr><td><code>GET /orders/{id}</code></td><td class="n">38.3 / 56.6 / 92.8</td><td class="n">41.3 / 62.3 / 100.1</td></tr>
+            <tr><td><code>GET /notifications</code></td><td class="n">34.7 / 51.7 / 87.0</td><td class="n">37.7 / 57.6 / 90.9</td></tr>
+            <tr><td><code>POST /orders</code></td><td class="n">76.1 / 109.0 / 164.0</td><td class="n worse">96.0 / 133.4 / 180.8</td></tr>
+            <tr><td>تأخير النسخ أثناء B</td><td class="n">—</td><td class="n">وسيط 2.2ms، أقصى 14.8ms</td></tr>
+            <tr><td>تكلفة قرار التوجيه (متوسط)</td><td class="n">—</td><td class="n">0.05–0.45ms مجهول، ~3ms مسجّل</td></tr>
+            <tr><td>القراءات: replica / أساسي</td><td class="n">—</td><td class="n">1,862 / 2</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <ul>
+        <li><strong>الـ replica لم يسرّع شيئاً على هذا الجهاز، و<code>POST /orders</code> صار أبطأ بحوالي 20ms:</strong> قراءته الأولى تفتح اتصالاً بالـ replica (~13ms)، ثم الكتابة تفتح اتصالاً ثانياً بالأساسي. بدون replica يكفيه اتصال واحد.</li>
+        <li><strong>قرار التوجيه نفسه رخيص.</strong> التكلفة الحقيقية هي فتح الاتصال (~13ms)، وهي نفس تكلفة الاتصال بالأساسي الذي يحل محله.</li>
+        <li><strong>لماذا لا مكسب هنا:</strong> القاعدتان على نفس المعالج ونفس القرص، فنقل القراءات ينقل الحمل ولا يزيد السعة. والأساسي لم يكن عنق الزجاجة أصلاً، ومعظم قراءات الكتالوج لا تصل لأي قاعدة بفضل Redis.</li>
+        <li><strong>متى يفيد الـ replica فعلاً:</strong> على جهاز منفصل، أو عندما يختنق الأساسي بالقراءات، أو لإبعاد التقارير الثقيلة عنه، أو كنسخة جاهزة للترقية عند تعطل الأساسي.</li>
+      </ul>
+    </article>
+
+  </div>
+</section>
+
+<!-- ============ ROADMAP ============ -->
+<section id="roadmap">
+  <div class="sec-head">
+    <span class="eyebrow">Requirement 3 · Performance &amp; Caching</span>
+    <h2>الخطة المتبقية</h2>
+    <p class="cap">ترتيب المتطلبات كما اتُّفق عليه. كل تحسين يُقاس وحده عند 100 req/s، والقياس الكامل في النهاية.</p>
+  </div>
+  <div class="road">
+    <div class="road-row"><span class="step">1</span><div class="what"><strong>Indexes وEXPLAIN وN+1</strong><span>6.1 و6.2 و6.3 أعلاه.</span></div><span class="chip done">منجز</span></div>
+    <div class="road-row"><span class="step">2</span><div class="what"><strong>Redis وسياسة الـ cache</strong><span>تفاصيل المنتج، وصفحات الكتالوج بمفتاح إصدار، و<code>COUNT(*)</code>. الإلغاء بعد الـ commit فقط. المخزون للعرض فقط لثوانٍ قليلة. لا cache أبداً للأسعار عند إنشاء الطلب، ولا للـ JWT، ولا لطلبات المستخدم. التفاصيل في 6.4 أعلاه.</span></div><span class="chip done">منجز</span></div>
+    <div class="road-row"><span class="step">3</span><div class="what"><strong>ETag و304</strong><span><code>Cache-Control: no-cache</code> (تحقّق في كل مرة)، والـ ETag يتغير عند تغيّر المخزون. عدّ استجابات 304 في k6. التفاصيل في 6.5 أعلاه.</span></div><span class="chip done">منجز</span></div>
+    <div class="road-row"><span class="step">4</span><div class="what"><strong>Read replica وقراءة ما كتبه المستخدم فوراً</strong><span>replica بـ streaming في compose. بعد أي كتابة تذهب قراءات هذا المستخدم إلى الـ primary لثوانٍ قليلة (مفتاح في Redis)، مع إثبات أن الطلب الجديد يظهر فوراً في <code>GET /orders</code>. التفاصيل في 6.6 أعلاه.</span></div><span class="chip done">منجز</span></div>
+    <div class="road-row"><span class="step">5</span><div class="what"><strong>إثبات أن التعديل يظهر فوراً</strong><span>اختبار وسكربت في <code>docs/proofs/</code>: يعدّل الأدمن السعر والمخزون، فيرجع <code>GET /products/{id}</code> مباشرة بالبيانات الجديدة وETag جديد، ولا يرجع 304 للـ ETag القديم. نُفّذ مع 6.5 (<code>etag-freshness.js</code>) و6.6 (<code>replica-read-your-writes.js</code>).</span></div><span class="chip done">منجز</span></div>
+    <div class="road-row"><span class="step">6</span><div class="what"><strong>القياس النهائي</strong><span>عند 40 و120 req/s، بيانات جديدة، إحماء، 3 تشغيلات، الوسيط. قبل وبعد بشكل متتالٍ، مع قسم عن السلوك الملحوظ: الـ cache البارد، نسبة الـ hit، أين انتقل الاختناق، تأخر الـ replica، وتذبذب الـ p99. النتائج في "المقارنة النهائية" أعلاه.</span></div><span class="chip done">منجز</span></div>
+    <div class="road-row"><span class="step">7</span><div class="what"><strong>Worker mode في FrankenPHP (اختياري، أخيراً)</strong><span>في تغيير وحده وقياس وحده، بعد مراجعة الحالة الـ static في <code>Events</code>. يعالج أكبر تكلفتين: الاتصال بقاعدة البيانات وإقلاع Laravel.</span></div><span class="chip wip">التالي (اختياري)</span></div>
+  </div>
+</section>
+
+<!-- ============ BASELINE ============ -->
+<section id="baseline">
+  <div class="sec-head">
+    <span class="eyebrow">docs/performance.md · 4, 4.2</span>
+    <h2>القياس الأساسي (قبل أي تحسين)</h2>
+    <p class="cap">بيانات جديدة، تشغيل إحماء، ثم ثلاث تشغيلات مدة كل منها دقيقتان، والعدّاد مطفأ. القيمة المعروضة هي الوسيط. بالميلي ثانية، 10 تشرين الثاني 2026.</p>
+  </div>
+
+  <div class="sub">
+    <h3>40 req/s: حمل عادي</h3>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Endpoint</th><th class="n">طلبات</th><th class="n">p50</th><th class="n">p95</th><th class="n">p99</th><th class="n">أخطاء</th><th class="n">استعلامات</th><th class="n">زمن DB للطلب</th></tr></thead>
+        <tbody>
+          <tr><td><code>GET /products</code></td><td class="n">1,441</td><td class="n">49.3</td><td class="n">99.6</td><td class="n">125.4</td><td class="n">0%</td><td class="n">2</td><td class="n">42.3</td></tr>
+          <tr><td><code>GET /products/{id}</code></td><td class="n">1,201</td><td class="n">37.2</td><td class="n">71.6</td><td class="n">89.9</td><td class="n">0%</td><td class="n">1</td><td class="n">24.5</td></tr>
+          <tr><td><code>GET /orders</code></td><td class="n">721</td><td class="n">33.1</td><td class="n">75.9</td><td class="n">88.1</td><td class="n">0%</td><td class="n">2</td><td class="n">31.5</td></tr>
+          <tr><td><code>GET /orders/{id}</code></td><td class="n">601</td><td class="n">44.4</td><td class="n">85.5</td><td class="n">98.1</td><td class="n">0%</td><td class="n">3</td><td class="n">42.3</td></tr>
+          <tr><td><code>GET /notifications</code></td><td class="n">601</td><td class="n">39.4</td><td class="n">78.8</td><td class="n">90.6</td><td class="n">0%</td><td class="n">2</td><td class="n">36.4</td></tr>
+          <tr><td><code>POST /orders</code></td><td class="n">241</td><td class="n">94.8</td><td class="n">133.0</td><td class="n">145.4</td><td class="n">0%</td><td class="n">8</td><td class="n">64.6</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul>
+      <li>في التشغيلات الثلاث: صفر أخطاء، صفر 409 أو 429، وصفر طلبات متأخرة.</li>
+      <li>التشغيلات متقاربة جداً: p50 ضمن ±1.5ms، وp95 ضمن ±4ms.</li>
+      <li>"زمن DB" يشمل فتح الاتصال بقاعدة البيانات في أول استعلام. لهذا تظهر قراءة واحدة بالمفتاح الأساسي بـ 24ms.</li>
+    </ul>
+  </div>
+
+  <div class="sub">
+    <h3>120 req/s: حمل عالٍ (حوالي 70% من السقف)</h3>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Endpoint</th><th class="n">طلبات</th><th class="n">p50</th><th class="n">p95 (أدنى–أعلى)</th><th class="n">p99 (أدنى–أعلى)</th><th class="n">أخطاء</th></tr></thead>
+        <tbody>
+          <tr><td><code>GET /products</code></td><td class="n">4,321</td><td class="n">50.9</td><td class="n">133.2 <span class="rng">(100.5–138.5)</span></td><td class="n">294.3 <span class="rng">(128.4–430.8)</span></td><td class="n">0%</td></tr>
+          <tr><td><code>GET /products/{id}</code></td><td class="n">3,601</td><td class="n">35.6</td><td class="n">79.4 <span class="rng">(49.6–82.4)</span></td><td class="n">200.5 <span class="rng">(70.1–312.2)</span></td><td class="n">0%</td></tr>
+          <tr><td><code>GET /orders</code></td><td class="n">2,161</td><td class="n">34.4</td><td class="n">73.5 <span class="rng">(46.8–76.8)</span></td><td class="n">192.8 <span class="rng">(63.4–297.4)</span></td><td class="n">0%</td></tr>
+          <tr><td><code>GET /orders/{id}</code></td><td class="n">1,681</td><td class="n">39.9</td><td class="n">80.6 <span class="rng">(53.7–83.7)</span></td><td class="n">194.8 <span class="rng">(70.5–324.3)</span></td><td class="n">0%</td></tr>
+          <tr><td><code>GET /notifications</code></td><td class="n">1,921</td><td class="n">35.1</td><td class="n">68.9 <span class="rng">(48.4–76.9)</span></td><td class="n">190.8 <span class="rng">(61.1–321.5)</span></td><td class="n">0%</td></tr>
+          <tr><td><code>POST /orders</code></td><td class="n">721</td><td class="n">72.6</td><td class="n">136.4 <span class="rng">(95.1–143.7)</span></td><td class="n">369.9 <span class="rng">(127.1–505.0)</span></td><td class="n">0%</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul>
+      <li><strong>p50 ثابت</strong> (±3ms بين التشغيلات)، وأقل قليلاً منه عند 40 لأن المعالج يبقى على تردد أعلى مع حركة أكثر.</li>
+      <li><strong>p95 وما فوقه متذبذب</strong> قرب السقف. تشغيل من الثلاثة كان p99 فيه أقل بـ 2 إلى 4 مرات. قارن p50 وp95 أولاً، واعتبر تغيّر p99 حقيقياً فقط إذا خرج بوضوح عن المدى بين القوسين.</li>
+      <li><strong>الإحماء ضروري هنا:</strong> تشغيل الإحماء بعد توليد البيانات مباشرة كان p95 فيه ضعف القياسات (مثلاً <code>GET /products</code> 288.5ms).</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ CAPACITY ============ -->
+<section id="capacity">
+  <div class="sec-head">
+    <span class="eyebrow">docs/performance.md · 4.1</span>
+    <h2>سقف الجهاز (حمل متصاعد)</h2>
+    <p class="cap">نفس السيناريوهات، تشغيل واحد لكل معدل مدته 90 ثانية، بعد توليد بيانات جديد، والعدّاد مطفأ. استهلاك CPU عينة من <code>docker stats</code> في منتصف كل تشغيل (100% = نواة واحدة من 12).</p>
+  </div>
+
+  <div class="chart" id="cap-chart">
+    <div class="chart-h">
+      <h3>المعدل المطلوب مقابل ما خُدم فعلاً</h3>
+      <div class="legend" aria-hidden="true">
+        <span><i class="line" style="background:var(--stage-1)"></i>ما خُدم (req/s)</span>
+        <span><i class="dash"></i>المثالي: كل ما طُلب</span>
+      </div>
+    </div>
+    <div class="svgbox" id="cap-svg"></div>
+    <p class="cap">بعد 165 req/s لا يزيد ما يُخدم، والزائد ينتظر في طابور. عند 320 ينخفض ما يُخدم نفسه إلى 113 req/s.</p>
+  </div>
+
+  <div class="tbl">
+    <table>
+      <thead><tr><th class="n">المطلوب</th><th class="n">خُدم</th><th class="n">متأخر</th><th class="n">p50 (عبر الـ endpoints)</th><th class="n">p95</th><th class="n">p99</th><th class="n">أخطاء</th><th class="n">CPU backend / db / k6</th></tr></thead>
+      <tbody>
+        <tr><td class="n">40</td><td class="n">40</td><td class="n">0</td><td class="n">28–70 ms</td><td class="n">62–105 ms</td><td class="n">76–112 ms</td><td class="n">0</td><td class="n">85% / 73% / 6%</td></tr>
+        <tr><td class="n">80</td><td class="n">80</td><td class="n">0</td><td class="n">22–57 ms</td><td class="n">51–98 ms</td><td class="n">68–102 ms</td><td class="n">0</td><td class="n">146% / 136% / 11%</td></tr>
+        <tr><td class="n">160</td><td class="n">160</td><td class="n">0</td><td class="n">44–90 ms</td><td class="n">176–315 ms</td><td class="n">345–542 ms</td><td class="n">0</td><td class="n">473% / 529% / 23%</td></tr>
+        <tr><td class="n">240</td><td class="n worse">165</td><td class="n">6,714</td><td class="n">13.7–16.8 s</td><td class="n">32 s</td><td class="n">32–33 s</td><td class="n">0</td><td class="n">319% / 466% / 366%</td></tr>
+        <tr><td class="n">320</td><td class="n worse">113</td><td class="n">17,902</td><td class="n">19.5–22.2 s</td><td class="n">61–63 s</td><td class="n">65–66 s</td><td class="n">5–7%</td><td class="n">453% / 281% / 135%</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <ul>
+    <li><strong>حتى 80 req/s النظام مرتاح.</strong></li>
+    <li><strong>160 req/s هي الحافة:</strong> كل شيء يُخدم بدون أخطاء، لكن p95 أعلى بمرتين إلى ثلاث، والباك إند وقاعدة البيانات يستهلك كل منهما حوالي 5 أنوية.</li>
+    <li><strong>السقف حوالي 165 req/s.</strong> عند 240 يخدم النظام 165 فقط، والباقي ينتظر 14 إلى 32 ثانية بدون أخطاء.</li>
+    <li><strong>عند 320 ينهار:</strong> 101 طلب وصلت حد PHP البالغ 30 ثانية (500)، و429 طلباً وصلت حد k6 البالغ 60 ثانية، وحوالي 2,700 كانت ما زالت تنتظر عند نهاية التشغيل.</li>
+    <li><strong>فوق 160 الأرقام تقيس k6 أيضاً:</strong> k6 على نفس الجهاز فتح حوالي 3,800 مستخدم افتراضي واستهلك حتى 3.7 أنوية و6 GB. رقم السقف موثوق، أما الأزمنة الدقيقة عند 240 و320 فلا.</li>
+  </ul>
+</section>
+
+<!-- ============ PROBLEMS ============ -->
+<section id="problems">
+  <div class="sec-head">
+    <span class="eyebrow">docs/performance.md · 5</span>
+    <h2>المشاكل المرصودة في القياس الأساسي</h2>
+    <p class="cap">مرتبة حسب أثرها. الحالة بجانب كل مشكلة تبيّن أين وصلنا.</p>
+  </div>
+  <div class="probs">
+    <div class="prob"><h3>1. اتصال جديد بـ PostgreSQL في كل طلب، حوالي 11ms</h3><span class="chip todo">Worker mode (7)</span><p>PHP يعمل في الوضع الكلاسيكي ولا يحتفظ بالاتصالات، فكل طلب يفتح اتصالاً جديداً بمصادقة scram-sha-256. قيس من داخل الحاوية: فتح الاتصال 11.1ms، وقراءة بالمفتاح الأساسي عليه 2.7ms.</p></div>
+    <div class="prob"><h3>2. Laravel يُقلع في كل طلب، حوالي 13ms</h3><span class="chip todo">Worker mode (7)</span><p>طلب <code>/health</code> بدون قاعدة بيانات ولا gRPC يأخذ 13.5ms. مع المشكلة الأولى هذا حوالي 25ms من 37ms في تفاصيل المنتج.</p></div>
+    <div class="prob"><h3>3. الصفحات العميقة في الكتالوج</h3><span class="chip done">عولجت (6.1، 6.2)</span><p>الصفحة 2,451 كانت ترتب 49,020 صفاً: 58.9ms مقابل 0.15ms للصفحة الأولى. صارت 9.96ms.</p></div>
+    <div class="prob"><h3>4. <code>COUNT(*)</code> في كل طلب قائمة</h3><span class="chip done">عولجت (6.4)</span><p><code>GET /products</code> يعدّ كل المنتجات في كل طلب (10.9ms) فقط لـ <code>pagination.total</code>. وفي قائمة الأدمن غير المصفّاة يأخذ <code>COUNT(*) FROM orders</code> حوالي 35.9ms (ليس ضمن سيناريوهات الحمل).</p></div>
+    <div class="prob"><h3>5. إنشاء الطلب أبطأ endpoint (p50 95ms)</h3><span class="chip info">يُقاس في النهاية</span><p>8 استعلامات: البحث عن المنتجات، ثم الإدخالات داخل transaction، ثم إعادة قراءة الطلب كاملاً (3 استعلامات) لبناء الاستجابة، مع استدعاء gRPC متزامن لـ <code>ReserveStock</code>. الحجز يجب أن يبقى استدعاءً حقيقياً.</p></div>
+    <div class="prob"><h3>6. كل طلب كتالوج يستدعي خدمة المخزون</h3><span class="chip done">عولجت جزئياً (6.4)</span><p>صار المخزون المعروض يُخزَّن 5 ثوانٍ، فأغلب طلبات الكتالوج لا تستدعي خدمة المخزون. كان قبل ذلك: استدعاء <code>GetStock</code> عبر اتصال HTTP/2 جديد في كل مرة (حوالي 2.4ms)، مع سطر log لكل استدعاء. المخزون لا يُخزَّن مؤقتاً أبداً، ولو لثوانٍ.</p></div>
+    <div class="prob"><h3>7. لا يوجد caching على مستوى HTTP أو التطبيق</h3><span class="chip done">عولجت (6.4، 6.5)</span><p>الكتالوج وصفحة المنتج عامة ومتطابقة لكل زائر، لكنها تُبنى من جديد في كل طلب: لا ETag، ولا Cache-Control، ولا cache store.</p></div>
+  </div>
+  <details>
+    <summary>ملاحظات أصغر</summary>
+    <div class="body">
+      <ul>
+        <li><code>findItems</code> يرتب بنود الطلب بالاسم: خطوة ترتيب على 1 إلى 5 صفوف، مهملة.</li>
+        <li>استعلام عدّ الإشعارات (<code>total</code> و<code>unread_count</code>) يقرأ كل إشعارات المستخدم من الـ index في كل طلب: 963 صفاً لمستخدم ثقيل، 1.2ms. مقبول الآن، ويكبر مع التاريخ.</li>
+        <li><code>CACHE_STORE=database</code>: محدّد تسجيل الدخول يكتب في جدول <code>cache</code>. ليس ضمن سيناريوهات الحمل، لكن كل تسجيل دخول يكلّف كتابات إضافية.</li>
+        <li>صفحة الطلبات عند الأدمن تحمّل كل المستخدمين (5,001 صف بدون تقسيم صفحات) لتعرض الإيميل.</li>
+      </ul>
+    </div>
+  </details>
+</section>
+
+<!-- ============ BEHAVIOR ============ -->
+<section id="behavior">
+  <div class="sec-head">
+    <span class="eyebrow">docs/performance.md · Observed behavior</span>
+    <h2>سلوك ملحوظ: الانهيار عند 120 req/s</h2>
+  </div>
+  <div class="note bad">
+    <p>بعد 6.2 انهار تشغيلان سريعان عند 120 req/s: p50 قفز من حوالي 50ms إلى 5–9 ثوانٍ في <strong>كل</strong> الـ endpoints معاً، وp95 إلى 12–17 ثانية، مع 1,100 إلى 1,600 طلب متأخر وبدون أخطاء.</p>
+  </div>
+  <div class="tbl">
+    <table>
+      <thead><tr><th>ما فحصناه</th><th>النتيجة</th></tr></thead>
+      <tbody>
+        <tr><td>هل السبب تغيير الكود؟</td><td>لا. بعد التراجع المؤقت عن 6.2 تكرر نفس الانهيار (p50 4.8 ثانية).</td></tr>
+        <tr><td>هل السبب حالة قاعدة البيانات؟</td><td>لا. لا صفوف ميتة، ولا autovacuum يعمل، والإحصاءات محدّثة، وكل استعلام يستخدم الـ index المتوقع.</td></tr>
+        <tr><td>هل الجهاز بطيء عموماً؟</td><td>لا. تشغيل عند 40 req/s بعده مباشرة كان طبيعياً (p50 35–44ms).</td></tr>
+        <tr><td>هل كان عند الجهاز CPU أقل؟</td><td>نعم. PostgreSQL حوالي 570% والباك إند حوالي 520%، أي كل الأنوية الـ 12 تقريباً. تحديث Visual Studio Installer بدأ التحميل في الخلفية (<code>BackgroundDownload.exe</code>) الساعة 19:44. آخر تشغيل سليم انتهى حوالي 19:40، وأول انهيار بدأ حوالي 19:45.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="sub">
+    <h3>لماذا ينهار بدل أن يبطؤ تدريجياً</h3>
+    <p>مع معدل وصول ثابت، إذا تأخر الخادم ولو قليلاً تبدأ الطلبات بالانتظار. طلبات منتظرة أكثر تعني threads PHP واتصالات PostgreSQL أكثر تعمل في نفس الوقت وتتنافس على نفس الأنوية، فيطول كل طلب، فتنتظر طلبات أكثر. تحت السقف بمسافة كافية يتعافى النظام من توقف قصير. قرب السقف يكفي توقف واحد ليدخله في طابور لا يستطيع تفريغه. 120 req/s هي حوالي 70% من سقف 165، وهذا هامش قليل على لابتوب يتقاسم معالجه مع كل البرامج الأخرى.</p>
+  </div>
+  <div class="note warn">
+    <p><strong>ما غيّرناه في طريقة القياس:</strong> القياس السريع بعد كل تغيير صار عند 100 req/s، مع إغلاق البرامج الثقيلة وتوصيل الجهاز بالكهرباء. والمقارنة النهائية تُقاس بشكل متتالٍ في نفس الجلسة: الكود الأساسي (<code>833dc94</code>) ثم الكود النهائي.</p>
+  </div>
+</section>
+
+<!-- ============ METHOD ============ -->
+<section id="method">
+  <div class="sec-head">
+    <span class="eyebrow">docs/performance.md · 1, 2</span>
+    <h2>طريقة القياس</h2>
+  </div>
+
+  <div class="sub">
+    <h3>البيانات</h3>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>الجدول</th><th class="n">الصفوف</th><th>ملاحظات</th></tr></thead>
+        <tbody>
+          <tr><td>users</td><td class="n">5,001</td><td>5,000 زبون <code>perf-user-{n}@example.test</code> وأدمن واحد</td></tr>
+          <tr><td>products</td><td class="n">50,000</td><td>10 فئات، أسعار 1–1000 أغلبها رخيص، حوالي 10% بدون وصف</td></tr>
+          <tr><td>orders</td><td class="n">200,000</td><td>موزعة على 12 شهراً</td></tr>
+          <tr><td>order_items</td><td class="n">601,076</td><td>1 إلى 5 منتجات مختلفة لكل طلب، المتوسط 3.0</td></tr>
+          <tr><td>order_status_history</td><td class="n">650,001</td><td>متسقة مع الحالة النهائية لكل طلب</td></tr>
+          <tr><td>notifications</td><td class="n">650,001</td><td>واحد لكل خطوة حالة، حوالي 14% غير مقروء</td></tr>
+          <tr><td>inventory <code>stock</code></td><td class="n">50,000</td><td>1,000,000 متاح لكل منتج</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul>
+      <li><strong>توزيع غير متساوٍ:</strong> 300 مستخدم ثقيل لكل منهم 250–340 طلباً، والباقون بين 2 و95. الوسيط 13.</li>
+      <li><strong>الحالات:</strong> delivered 60%، وshipped وconfirmed وpending وcancelled 10% لكل منها.</li>
+      <li><strong>ثابتة في كل تشغيل:</strong> كل قيمة "عشوائية" محسوبة من md5 لرقم الصف مع seed ثابت وتاريخ مرجعي ثابت، فتخرج نفس البيانات كل مرة.</li>
+      <li><strong>معرّفات قابلة للتمييز:</strong> UUID v4 صحيح فيه علامة النوع، مثلاً المنتج 12 هو <code>0000000c-0000-4000-8f00-000000000000</code>. <code>--fresh</code> يحذف بيانات الأداء فقط.</li>
+      <li><strong>محمي:</strong> <code>perf:seed</code> يعمل فقط عندما <code>APP_ENV</code> هي <code>local</code> أو <code>perf</code>.</li>
+    </ul>
+<pre># 1. قاعدة Laravel (حوالي 3 دقائق)
+docker compose --profile perf run --rm perf-tools perf:seed --fresh
+
+# 2. قاعدة المخزون (ثانيتان)
+docker compose exec inventory npm run seed:perf -- --products=50000 --fresh</pre>
+  </div>
+
+  <div class="sub">
+    <h3>اختبار الحمل (k6)</h3>
+    <p>كل سيناريو بمعدل وصول ثابت (<code>constant-arrival-rate</code>)، فكل تشغيل يرسل نفس عدد الطلبات في الثانية مهما كان زمن الاستجابة.</p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>السيناريو</th><th>الطلب</th><th class="n">الحصة</th></tr></thead>
+        <tbody>
+          <tr><td><code>browse_list</code></td><td><code>GET /products?page=N</code>: 70% الصفحات 1–5، و30% أي صفحة حتى الأخيرة</td><td class="n">30%</td></tr>
+          <tr><td><code>product_detail</code></td><td><code>GET /products/{id}</code> لمنتج عشوائي</td><td class="n">25%</td></tr>
+          <tr><td><code>my_orders</code></td><td><code>GET /orders?page=N</code>، نصفها مستخدمون ثقيلون ونصفها خفيفون</td><td class="n">15%</td></tr>
+          <tr><td><code>order_detail</code></td><td><code>GET /orders/{id}</code> لطلب يملكه المستخدم</td><td class="n">12%</td></tr>
+          <tr><td><code>my_notifications</code></td><td><code>GET /notifications?page=N</code></td><td class="n">13%</td></tr>
+          <tr><td><code>create_order</code></td><td><code>POST /orders</code> بمنتج إلى 3 منتجات</td><td class="n">5%</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul>
+      <li><strong>تسجيل الدخول:</strong> 160 مستخدماً مرة واحدة في <code>setup()</code>، ثم إعادة استخدام التوكنات. محدّد الدخول يحسب المحاولات الفاشلة فقط، فلم يُرفع أي حد.</li>
+      <li><strong>ما يُسجَّل لكل endpoint:</strong> p50 وp90 وp95 وp99، وتصنيف الاستجابات (2xx، 409 نقص مخزون، 429، 4xx، 5xx، شبكة). 409 و429 ليسا ضمن نسبة الأخطاء.</li>
+      <li><strong>عدّاد الاستعلامات:</strong> <code>PERF_QUERY_LOG=true</code> يضيف هيدري <code>X-Query-Count</code> و<code>X-Query-Time-Ms</code>. مطفأ في قياسات الزمن، ويُشغَّل في تشغيل منفصل قصير.</li>
+    </ul>
+<pre># تجربة سريعة
+docker compose --profile perf run --rm -e PROFILE=smoke k6
+
+# قياس كامل (40 req/s، دقيقتان)
+docker compose --profile perf run --rm -e LABEL=baseline-1 k6
+
+# معدل ومدة من اختيارك
+docker compose --profile perf run --rm -e RATE=120 -e DURATION=90s -e LABEL=rate-120 k6</pre>
+  </div>
+
+  <div class="sub">
+    <h3>الإجراء</h3>
+    <ol>
+      <li>توليد بيانات جديدة في القاعدتين (<code>--fresh</code>).</li>
+      <li>تشغيل إحماء لا يُحتسب.</li>
+      <li>ثلاث تشغيلات مدة كل منها دقيقتان، والعدّاد مطفأ. القيمة المعروضة هي الوسيط لكل رقم.</li>
+      <li>تشغيل منفصل 30 ثانية بالعدّاد مفعّل لعدّ الاستعلامات.</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ============ ENVIRONMENT ============ -->
+<section id="environment">
+  <div class="sec-head">
+    <span class="eyebrow">docs/performance.md · 3</span>
+    <h2>البيئة</h2>
+  </div>
+  <div class="tbl">
+    <table>
+      <tbody>
+        <tr><th>الجهاز</th><td>Windows 11 Pro، Intel Core i5-1235U (10 أنوية / 12 thread)، ذاكرة 15.7 GB</td></tr>
+        <tr><th>Docker</th><td>Docker Desktop 29.9.2 على WSL2، متاح له <strong>12 CPU و7.6 GB</strong></td></tr>
+        <tr><th>الباك إند</th><td>FrankenPHP 1.13.5، PHP 8.4.27، <strong>الوضع الكلاسيكي وليس worker mode</strong>، <code>num_threads 32</code>، OPcache مفعّل، <code>APP_ENV=production</code></td></tr>
+        <tr><th>قاعدة البيانات</th><td>PostgreSQL 16.15 بالإعدادات الافتراضية: <code>shared_buffers</code> 160 MB، <code>work_mem</code> 4 MB، <code>max_connections</code> 100</td></tr>
+        <tr><th>المخزون</th><td>Node 20 (<code>@grpc/grpc-js</code>) وPostgreSQL 16، pool من 10 اتصالات</td></tr>
+        <tr><th>Redis (منذ 6.4)</th><td><code>redis:7.4-alpine</code> بدون حفظ على القرص، 256MB مع <code>volatile-lru</code>، والباك إند يستخدم <code>phpredis</code> باتصال مهلته 0.3 ثانية وبدون إعادة محاولة</td></tr>
+        <tr><th>مولّد الحمل</th><td>k6 0.54.0 في حاوية <strong>على نفس الجهاز</strong>، يتقاسم المعالج مع النظام المُختبَر</td></tr>
+        <tr><th>حالة الجهاز</th><td>للقياسات السريعة بعد الانهيار: البرامج الثقيلة مغلقة والجهاز موصول بالكهرباء. للقياس الأساسي: غير موثّقة.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+</div>
+</main>
+
+<footer>
+  <div class="wrap">المصدر: <code>docs/performance.md</code> على الفرع <code>feat/perf-optimizations</code>. النتائج الخام في <code>perf/results/</code> (محلية، غير محفوظة في git).</div>
+</footer>
+
+<script>
+(function () {
+  var NS = 'http://www.w3.org/2000/svg';
+  function el(tag, attrs, parent) {
+    var n = document.createElementNS(NS, tag);
+    for (var k in attrs) n.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(n);
+    return n;
+  }
+  function tipFor(box) {
+    var t = document.createElement('div');
+    t.className = 'tip'; t.hidden = true; box.appendChild(t);
+    return {
+      show: function (html, x, y) { t.innerHTML = html; t.style.left = x + 'px'; t.style.top = y + 'px'; t.hidden = false; },
+      hide: function () { t.hidden = true; }
+    };
+  }
+  function pos(box, evt) {
+    var r = box.getBoundingClientRect();
+    return [evt.clientX - r.left + box.scrollLeft, evt.clientY - r.top];
+  }
+
+  // ---- EXPLAIN chart: grouped horizontal bars, one group per query ----
+  (function () {
+    var box = document.getElementById('explain-svg');
+    var data = [
+      { q: 'Q1 page 1', v: [0.19, 0.10, 0.29] },
+      { q: 'Q2 deep page', v: [43.96, 28.29, 9.96] },
+      { q: 'Q3 category p.100', v: [6.50, 5.69, 0.73] },
+      { q: 'Q4 user orders', v: [1.05, 0.60, null] },
+      { q: 'Q5 admin by status', v: [3.91, 2.91, null] }
+    ];
+    var stages = ['قبل', 'بعد 6.1', 'بعد 6.2'];
+    var fills = ['var(--stage-0)', 'var(--stage-1)', 'var(--stage-2)'];
+    var W = 760, left = 150, right = 70, top = 10, barH = 12, gap = 2, groupGap = 16;
+    var groupH = 3 * barH + 2 * gap;
+    var H = top + data.length * (groupH + groupGap) + 24;
+    var max = 45, plotW = W - left - right;
+    var x = function (v) { return left + (v / max) * plotW; };
+    var svg = el('svg', { viewBox: '0 0 ' + W + ' ' + H, role: 'img', 'aria-label': 'زمن تنفيذ الاستعلامات قبل وبعد التحسينات بالميلي ثانية' }, box);
+    [0, 10, 20, 30, 40].forEach(function (t) {
+      el('line', { x1: x(t), x2: x(t), y1: top - 4, y2: H - 22, class: 'grid' }, svg);
+      var tx = el('text', { x: x(t), y: H - 6, 'text-anchor': 'middle' }, svg); tx.textContent = t + ' ms';
+    });
+    el('line', { x1: left, x2: left, y1: top - 4, y2: H - 22, class: 'axis' }, svg);
+    var tip = tipFor(box);
+    data.forEach(function (d, i) {
+      var gy = top + i * (groupH + groupGap);
+      var lab = el('text', { x: left - 10, y: gy + groupH / 2 + 4, 'text-anchor': 'end', class: 'lbl' }, svg);
+      lab.textContent = d.q;
+      d.v.forEach(function (v, s) {
+        var y = gy + s * (barH + gap);
+        if (v === null) {
+          var na = el('text', { x: left + 6, y: y + barH - 2 }, svg); na.textContent = 'not changed in 6.2';
+          na.setAttribute('fill', 'var(--ink-3)'); na.style.fill = 'var(--ink-3)';
+          return;
+        }
+        var w = Math.max(2, x(v) - left);
+        // bar anchored at the baseline, rounded only at the data end
+        var r = Math.min(4, w / 2);
+        var p = 'M' + left + ',' + y + ' h' + (w - r) + ' a' + r + ',' + r + ' 0 0 1 ' + r + ',' + r +
+                ' v' + (barH - 2 * r) + ' a' + r + ',' + r + ' 0 0 1 ' + (-r) + ',' + r + ' h' + (-(w - r)) + ' z';
+        var bar = el('path', { d: p, fill: fills[s] }, svg);
+        bar.style.fill = fills[s];
+        var val = el('text', { x: left + w + 6, y: y + barH - 2 }, svg); val.textContent = v.toFixed(2);
+        var hit = el('rect', { x: left, y: y - 1, width: Math.max(w + 50, 60), height: barH + 2, fill: 'transparent' }, svg);
+        hit.style.cursor = 'default';
+        hit.addEventListener('mousemove', function (e) {
+          var pt = pos(box, e);
+          tip.show(d.q + ' · ' + stages[s] + ': <b>' + v.toFixed(2) + ' ms</b>', pt[0], pt[1]);
+        });
+        hit.addEventListener('mouseleave', tip.hide);
+      });
+    });
+  })();
+
+  // ---- Capacity chart: served vs target, with the ideal diagonal ----
+  (function () {
+    var box = document.getElementById('cap-svg');
+    var pts = [
+      { t: 40, s: 40, p95: '62–105 ms', drop: 0 },
+      { t: 80, s: 80, p95: '51–98 ms', drop: 0 },
+      { t: 160, s: 160, p95: '176–315 ms', drop: 0 },
+      { t: 240, s: 165, p95: '32 s', drop: 6714 },
+      { t: 320, s: 113, p95: '61–63 s', drop: 17902 }
+    ];
+    var W = 760, H = 300, l = 56, r = 24, t = 16, b = 40;
+    var max = 340;
+    var x = function (v) { return l + (v / max) * (W - l - r); };
+    var y = function (v) { return H - b - (v / max) * (H - t - b); };
+    var svg = el('svg', { viewBox: '0 0 ' + W + ' ' + H, role: 'img', 'aria-label': 'المعدل المطلوب مقابل ما خُدم فعلاً بالطلبات في الثانية' }, box);
+    [0, 80, 160, 240, 320].forEach(function (v) {
+      el('line', { x1: l, x2: W - r, y1: y(v), y2: y(v), class: 'grid' }, svg);
+      var ty = el('text', { x: l - 8, y: y(v) + 4, 'text-anchor': 'end' }, svg); ty.textContent = v;
+    });
+    pts.forEach(function (p) {
+      var tx = el('text', { x: x(p.t), y: H - b + 18, 'text-anchor': 'middle' }, svg); tx.textContent = p.t;
+    });
+    var xl = el('text', { x: W - r, y: H - 4, 'text-anchor': 'end' }, svg); xl.textContent = 'target req/s →';
+    var yl = el('text', { x: l, y: t - 4 + 8, 'text-anchor': 'start' }, svg); yl.textContent = 'served req/s';
+    el('line', { x1: l, x2: W - r, y1: H - b, y2: H - b, class: 'axis' }, svg);
+    var ideal = el('line', { x1: x(0), y1: y(0), x2: x(320), y2: y(320), 'stroke-width': 2, 'stroke-dasharray': '5 5' }, svg);
+    ideal.style.stroke = 'var(--chart-ref)';
+    // ceiling marker
+    var ceil = el('line', { x1: l, x2: W - r, y1: y(165), y2: y(165), 'stroke-width': 1, 'stroke-dasharray': '2 4' }, svg);
+    ceil.style.stroke = 'var(--bad)';
+    var ct = el('text', { x: l + 6, y: y(165) - 6 }, svg); ct.textContent = 'ceiling ≈ 165';
+    ct.style.fill = 'var(--bad)';
+    var d = pts.map(function (p, i) { return (i ? 'L' : 'M') + x(p.t) + ',' + y(p.s); }).join(' ');
+    var line = el('path', { d: d, fill: 'none', 'stroke-width': 2, 'stroke-linejoin': 'round' }, svg);
+    line.style.stroke = 'var(--stage-1)';
+    var tip = tipFor(box);
+    pts.forEach(function (p) {
+      var ring = el('circle', { cx: x(p.t), cy: y(p.s), r: 6 }, svg); ring.style.fill = 'var(--surface)';
+      var dot = el('circle', { cx: x(p.t), cy: y(p.s), r: 4 }, svg); dot.style.fill = 'var(--stage-1)';
+      var lab = el('text', { x: x(p.t), y: y(p.s) - 12, 'text-anchor': 'middle' }, svg); lab.textContent = p.s;
+      lab.style.fill = 'var(--ink)';
+      var hit = el('circle', { cx: x(p.t), cy: y(p.s), r: 18, fill: 'transparent' }, svg);
+      hit.addEventListener('mousemove', function (e) {
+        var pt = pos(box, e);
+        tip.show('المطلوب <b>' + p.t + '</b> · خُدم <b>' + p.s + '</b> req/s<br>p95: <b>' + p.p95 + '</b> · متأخر: <b>' + p.drop.toLocaleString('en') + '</b>', pt[0], pt[1]);
+      });
+      hit.addEventListener('mouseleave', tip.hide);
+    });
+  })();
+})();
+</script>
+</body>
+</html>

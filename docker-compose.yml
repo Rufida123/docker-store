@@ -7,8 +7,26 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+    # Primary of the streaming replication (docs/performance.md, 6.6).
+    # wal_level=replica is already PostgreSQL 16's default; the hba file adds
+    # the replication login; max_slot_wal_keep_size caps the WAL a stopped
+    # replica can make the primary keep (beyond it the slot is invalidated
+    # and the replica must be rebuilt, see README), so it can't fill the disk.
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=5
+      - -c
+      - max_replication_slots=5
+      - -c
+      - max_slot_wal_keep_size=1GB
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
     volumes:
       - pgdata_laravel:/var/lib/postgresql/data
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
     ports:
       - "5432:5432"
     healthcheck:
@@ -56,6 +74,10 @@ services:
       INVENTORY_CONNECT_TIMEOUT_MS: 500
       # Load tests only: X-Query-Count / X-Query-Time-Ms headers (docs/performance.md).
       PERF_QUERY_LOG: ${PERF_QUERY_LOG:-false}
+      # Read replica (docs/performance.md, 6.6): reads may go to db_replica,
+      # writes always go to db. Empty = one connection to the primary. The
+      # API never depends on the replica: if it is down, reads use db.
+      DB_READ_HOST: ${DB_READ_HOST-db_replica} # "DB_READ_HOST=" turns the replica off
       # Catalog cache (docs/performance.md, 6.4). Without Redis the API keeps
       # serving from the database, so there is no hard dependency on it.
       REDIS_HOST: redis
@@ -76,8 +98,11 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    environment: *backend-environment
     entrypoint: ["php", "artisan", "schedule:work"]
+    # The outbox and every scheduled job read and write on the primary only.
+    environment:
+      <<: *backend-environment
+      DB_READ_HOST: ""
     volumes:
       - ./secrets:/run/secrets:ro
 
@@ -93,6 +118,33 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # Hot standby of db (streaming replication), read-only. Built from the
+  # official image: the script makes the base backup on first start.
+  # REPLICA_APPLY_DELAY=3s delays replay on purpose (demo of replication lag).
+  db_replica:
+    image: postgres:16-alpine
+    container_name: laravel_db_replica
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      REPLICATION_USER: ${REPLICATION_USER:?set REPLICATION_USER in .env}
+      REPLICATION_PASSWORD: ${REPLICATION_PASSWORD:?set REPLICATION_PASSWORD in .env}
+      REPLICA_APPLY_DELAY: ${REPLICA_APPLY_DELAY:-0}
+    entrypoint: ["sh", "/usr/local/bin/replica-entrypoint.sh"]
+    volumes:
+      - replica_pgdata_laravel:/var/lib/postgresql/data
+      - ./postgres/replica-entrypoint.sh:/usr/local/bin/replica-entrypoint.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
 
   inventory_db:
     image: postgres:16-alpine
@@ -157,6 +209,7 @@ services:
     environment:
       <<: *backend-environment
       APP_ENV: perf
+      DB_READ_HOST: "" # perf:seed reads its own temp tables: primary only
     entrypoint: ["php", "artisan"]
     command: ["perf:seed"]
 
@@ -176,5 +229,6 @@ services:
 
 volumes:
   pgdata_laravel:
+  replica_pgdata_laravel:
   uploads_laravel:
   inventory_pgdata_laravel:
