@@ -28,6 +28,16 @@ class NotificationsModule
     }
 
     /**
+     * Called by the mail worker for each order.created / order.status_changed
+     * message. Throws when the email could not be sent: the consumer then
+     * retries and finally moves the message to the dead-letter queue.
+     */
+    public function sendOrderEmail(array $message): void
+    {
+        $this->service->sendOrderEmail($message);
+    }
+
+    /**
      * Whether Firebase push is configured. Resolving it also logs the push
      * status, which the startup check uses to announce it once per boot.
      */

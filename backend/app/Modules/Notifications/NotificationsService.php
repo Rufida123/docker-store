@@ -2,9 +2,13 @@
 
 namespace App\Modules\Notifications;
 
+use App\Modules\Orders\OrdersModule;
+use App\Modules\Users\UsersModule;
 use App\Shared\AppError;
 use App\Shared\Text;
 use App\Shared\Validation;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Mail;
 
 /**
  * Business rules for persistent, user-owned notifications and their push delivery.
@@ -193,5 +197,47 @@ class NotificationsService
             'url' => "/orders/{$orderId}",
         ]);
         $this->repo->deleteDeviceTokens($deadTokens);
+    }
+
+    // ---- order emails (mail worker) ----
+
+    public function sendOrderEmail(array $message): void
+    {
+        // A message can be delivered twice (worker killed after sending, before
+        // the ack): remember what was sent so the customer gets one email.
+        $sentKey = 'mail:sent:'.$message['id'];
+        if (Cache::store(config('rabbitmq.cache_store'))->has($sentKey)) {
+            return;
+        }
+
+        $data = $message['data'];
+
+        // Resolved here, not in the constructor: OrdersService already depends
+        // on NotificationsModule, so injecting OrdersModule would loop.
+        $order = app(OrdersModule::class)->summary($data['orderId']);
+        $email = app(UsersModule::class)->emailOf($data['userId']);
+        if ($order === null || $email === null) {
+            throw new \RuntimeException("order {$data['orderId']} or its customer not found");
+        }
+
+        $short = '#'.substr($order['id'], 0, 8);
+        $lines = array_map(
+            fn (array $i) => "- {$i['quantity']} x {$i['product_name']} ({$i['unit_price']})",
+            $order['items'],
+        );
+
+        if ($message['type'] === 'order.created') {
+            $subject = "We received your order {$short}";
+            $intro = "Thank you! Your order {$short} was placed and is waiting for confirmation.";
+        } else {
+            $subject = "Your order {$short} is now {$data['to']}";
+            $intro = "The status of your order {$short} changed to: {$data['to']}.";
+        }
+
+        $body = $intro."\n\n".implode("\n", $lines)."\n\nTotal: {$order['total']}\n";
+
+        Mail::raw($body, fn ($m) => $m->to($email)->subject($subject));
+
+        Cache::store(config('rabbitmq.cache_store'))->put($sentKey, 1, 86400);
     }
 }

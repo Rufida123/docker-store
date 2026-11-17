@@ -80,6 +80,17 @@ class OrdersRepository
         return $rows === [] ? null : self::orderRow($rows[0]);
     }
 
+    public function isOwnedBy(string $orderId, string $userId): bool
+    {
+        // The primary, never the replica: the RabbitMQ permission check has no
+        // "this user just wrote" context, and a lagging replica would refuse a
+        // customer who has just placed the order.
+        return DB::selectFromWriteConnection(
+            'SELECT 1 FROM orders WHERE id = ? AND user_id = ?',
+            [$orderId, $userId],
+        ) !== [];
+    }
+
     public function findItems(string $orderId): array
     {
         $rows = DB::select(

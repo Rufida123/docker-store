@@ -52,6 +52,14 @@ class UsersRepository
         return array_map(self::row(...), $rows);
     }
 
+    public function emailOf(string $userId): ?string
+    {
+        // Primary on purpose: the worker must see a user created a moment ago.
+        $rows = DB::selectFromWriteConnection('SELECT email FROM users WHERE id = ?', [$userId]);
+
+        return $rows === [] ? null : $rows[0]->email;
+    }
+
     private static function row(object $row): array
     {
         $user = (array) $row;

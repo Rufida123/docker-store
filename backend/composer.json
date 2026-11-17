@@ -9,13 +9,14 @@
                  ],
     "license":  "MIT",
     "require":  {
-                    "php":  "^8.4",
-                    "firebase/php-jwt":  "7.2",
-                    "google/protobuf":  "*",
-                    "kreait/firebase-php":  "^8.6",
-                    "laravel/framework":  "^13.0",
-                    "laravel/tinker":  "^3.0"
-                },
+        "php": "^8.4",
+        "firebase/php-jwt": "7.2",
+        "google/protobuf": "*",
+        "kreait/firebase-php": "^8.6",
+        "laravel/framework": "^13.0",
+        "laravel/tinker": "^3.0",
+        "php-amqplib/php-amqplib": "^3.7"
+    },
     "require-dev":  {
                         "fakerphp/faker":  "^1.23",
                         "laravel/pail":  "^1.2.5",

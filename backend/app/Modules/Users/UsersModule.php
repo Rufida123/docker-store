@@ -22,4 +22,13 @@ class UsersModule
     {
         return $this->service->ensureAdmin();
     }
+
+    /**
+     * The email address of a user, or null when there is no such user.
+     * Read from the primary (used by the mail worker).
+     */
+    public function emailOf(string $userId): ?string
+    {
+        return $this->service->emailOf($userId);
+    }
 }
