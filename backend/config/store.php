@@ -16,6 +16,10 @@ return [
 
     'uploads_dir' => env('UPLOAD_DIR') ?: base_path('uploads'),
 
+    'events' => [
+        'publish' => filter_var(env('EVENTS_PUBLISH', true), FILTER_VALIDATE_BOOLEAN),
+    ],
+
     'inventory' => [
         'addr' => env('INVENTORY_GRPC_ADDR', 'localhost:50051'),
         'timeout_ms' => (int) env('INVENTORY_TIMEOUT_MS', 2000),
