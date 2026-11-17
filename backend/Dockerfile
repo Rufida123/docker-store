@@ -4,7 +4,7 @@ FROM dunglas/frankenphp:php8.4
 
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
-RUN install-php-extensions pdo_pgsql pgsql intl zip opcache
+RUN install-php-extensions pdo_pgsql pgsql intl zip opcache sockets
 
 # Same limits as the development php.ini.
 RUN { \

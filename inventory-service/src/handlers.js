@@ -135,7 +135,7 @@ async function releaseStock({ reservation_id: reservationId }) {
   try {
     await client.query('BEGIN');
 
-    const { rows } = await client.query(
+    let { rows } = await client.query(
       'SELECT status FROM reservations WHERE id = $1 FOR UPDATE',
       [id]
     );
@@ -143,13 +143,27 @@ async function releaseStock({ reservation_id: reservationId }) {
     if (rows.length === 0) {
       // Tombstone: this id can never reserve stock any more. If two releases
       // race here, ON CONFLICT lets the second one pass quietly.
-      await client.query(
+      const tombstone = await client.query(
         `INSERT INTO reservations (id, status, released_at) VALUES ($1, 'released', NOW())
          ON CONFLICT (id) DO NOTHING`,
         [id]
       );
-      await client.query('COMMIT');
-      return { status: 'NOT_FOUND' };
+      if (tombstone.rowCount === 1) {
+        await client.query('COMMIT');
+        return { status: 'NOT_FOUND' };
+      }
+
+      // Nothing inserted: a reserve for this id was still in flight (its row
+      // was invisible to the SELECT above) and has committed since the INSERT
+      // waited for it. The reservation is real, so give its stock back below
+      // instead of reporting NOT_FOUND and leaving it reserved forever.
+      ({ rows } = await client.query(
+        'SELECT status FROM reservations WHERE id = $1 FOR UPDATE',
+        [id]
+      ));
+      if (rows.length === 0) {
+        throw new Error('reservation vanished while releasing');
+      }
     }
 
     if (rows[0].status === 'released') {

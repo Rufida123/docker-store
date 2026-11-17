@@ -44,6 +44,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     environment: &backend-environment
       APP_NAME: "Docker Store"
       APP_ENV: production
@@ -82,6 +84,19 @@ services:
       # serving from the database, so there is no hard dependency on it.
       REDIS_HOST: redis
       CATALOG_CACHE_STORE: ${CATALOG_CACHE_STORE:-catalog}
+      # RabbitMQ (AMQP, internal network only): order events and real-time.
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USER: ${RABBITMQ_USER}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      # Outgoing email (SMTP), used by the mail worker.
+      MAIL_MAILER: ${MAIL_MAILER:-smtp}
+      MAIL_HOST: ${MAIL_HOST}
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_SCHEME: ${MAIL_SCHEME:-}
+      MAIL_USERNAME: ${MAIL_USERNAME}
+      MAIL_PASSWORD: ${MAIL_PASSWORD}
+      MAIL_FROM_ADDRESS: ${MAIL_FROM_ADDRESS}
+      MAIL_FROM_NAME: "Docker Store"
     ports:
       - "${PORT}:3000"
     volumes:
@@ -106,6 +121,27 @@ services:
     volumes:
       - ./secrets:/run/secrets:ro
 
+  # Same image as backend; consumes mail.order_events and sends the order
+  # emails. Independent of the API: it reads the primary only, and a message
+  # it did not finish returns to the queue when it stops.
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: laravel_worker
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    entrypoint: ["php", "artisan", "rabbitmq:work-mail"]
+    environment:
+      <<: *backend-environment
+      DB_READ_HOST: ""
+    volumes:
+      - ./secrets:/run/secrets:ro
+
   # Cache for the product catalog. Data is disposable: no volume, and an
   # eviction policy so it never refuses writes when full.
   redis:
@@ -117,6 +153,30 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
+      retries: 10
+
+  # Message broker for order events (workers) and real-time updates (browsers
+  # over Web-STOMP). Browser logins are checked by Laravel through the HTTP
+  # auth backend (rabbitmq/rabbitmq.conf).
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: laravel_rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    volumes:
+      - rabbitmq_data_laravel:/var/lib/rabbitmq
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - ./rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+    ports:
+      - "15672:15672"   # management UI (demo and proofs)
+      - "15674:15674"   # Web-STOMP, used by the browsers
+      # 5672 (AMQP) is NOT published: only the backend and the worker use it.
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
       retries: 10
 
   # Hot standby of db (streaming replication), read-only. Built from the
@@ -232,3 +292,4 @@ volumes:
   replica_pgdata_laravel:
   uploads_laravel:
   inventory_pgdata_laravel:
+  rabbitmq_data_laravel:

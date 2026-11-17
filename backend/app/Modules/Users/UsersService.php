@@ -96,6 +96,11 @@ class UsersService
         return $this->repo->list();
     }
 
+    public function emailOf(string $userId): ?string
+    {
+        return $this->repo->emailOf($userId);
+    }
+
     /**
      * @return array{status: string, email: string}
      */

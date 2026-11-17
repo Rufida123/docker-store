@@ -88,6 +88,15 @@ return [
             'lock_connection' => 'catalog',
         ],
 
+        // Real-time roles and the sent-mail memory: same fast-failing Redis
+        // connection. Redis (not the database store), because the database
+        // store can be read from a lagging replica.
+        'realtime' => [
+            'driver' => 'redis',
+            'connection' => 'catalog',
+            'lock_connection' => 'catalog',
+        ],
+
         'redis' => [
             'driver' => 'redis',
             'connection' => env('REDIS_CACHE_CONNECTION', 'cache'),

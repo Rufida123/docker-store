@@ -225,6 +225,36 @@ class OrdersService
     }
 
     /**
+     * What the confirmation emails need (called by the mail worker through
+     * OrdersModule): id, status, total and the items. There is no access check
+     * on purpose: the caller is a trusted background job, not a user. Uses the
+     * same repository methods as loadOrder(), without the status history.
+     */
+    public function summary(string $orderId): ?array
+    {
+        $order = $this->repo->findById($orderId);
+        if ($order === null) {
+            return null;
+        }
+
+        return [
+            'id' => $order['id'],
+            'status' => $order['status'],
+            'total' => (string) $order['total'],
+            'items' => array_map(fn (array $item) => [
+                'product_name' => $item['product_name'],
+                'quantity' => (int) $item['quantity'],
+                'unit_price' => (string) $item['unit_price'],
+            ], $this->repo->findItems($orderId)),
+        ];
+    }
+
+    public function isOwnedBy(string $orderId, string $userId): bool
+    {
+        return $this->repo->isOwnedBy(mb_strtolower($orderId), $userId);
+    }
+
+    /**
      * GET /orders?page=&limit=&status=&user_id=
      * Every order in the page includes its items (not its history).
      * Customers always get their own orders (a user_id in the query is ignored).

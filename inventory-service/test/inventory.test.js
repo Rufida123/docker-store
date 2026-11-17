@@ -185,6 +185,72 @@ test('releasing an unknown id leaves a tombstone that blocks a late reserve', as
   assert.equal(await available(a), 2);
 });
 
+// A reserve whose transaction is still open (the app's call timed out but the
+// service has not finished). Used to hold a reservation "in flight" so a
+// release can arrive in the middle of it.
+async function startInFlightReserve(reservation, productId, quantity) {
+  const client = await pool.connect();
+  await client.query('BEGIN');
+  await client.query(`INSERT INTO reservations (id, status) VALUES ($1, 'reserved')`, [reservation]);
+  await client.query('UPDATE stock SET available = available - $2 WHERE product_id = $1', [productId, quantity]);
+  await client.query(
+    'INSERT INTO reservation_items (reservation_id, product_id, quantity) VALUES ($1, $2, $3)',
+    [reservation, productId, quantity]
+  );
+  return client;
+}
+
+// Waits until some session is blocked on a lock inside the tombstone insert.
+async function waitForBlockedRelease() {
+  for (let i = 0; i < 100; i += 1) {
+    const { rowCount } = await pool.query(
+      `SELECT 1 FROM pg_stat_activity
+        WHERE wait_event_type = 'Lock' AND query ILIKE 'INSERT INTO reservations%released%'`
+    );
+    if (rowCount > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error('the release never blocked on the in-flight reserve');
+}
+
+test('a release that arrives while the reserve is still in flight gives the stock back', async () => {
+  const a = randomUUID();
+  const reservation = randomUUID();
+  await call(admin, 'AdjustStock', { product_id: a, change: 5 });
+
+  const reserving = await startInFlightReserve(reservation, a, 2);
+  const releasing = call(inventory, 'ReleaseStock', { reservation_id: reservation });
+  await waitForBlockedRelease();
+  await reserving.query('COMMIT');
+  reserving.release();
+
+  assert.equal((await releasing).status, 'RELEASED');
+  assert.equal(await available(a), 5);
+  const { rows } = await pool.query('SELECT status FROM reservations WHERE id = $1', [reservation]);
+  assert.equal(rows[0].status, 'released');
+});
+
+test('a release that waits on a reserve that rolls back leaves a tombstone', async () => {
+  const a = randomUUID();
+  const reservation = randomUUID();
+  await call(admin, 'AdjustStock', { product_id: a, change: 5 });
+
+  const reserving = await startInFlightReserve(reservation, a, 2);
+  const releasing = call(inventory, 'ReleaseStock', { reservation_id: reservation });
+  await waitForBlockedRelease();
+  await reserving.query('ROLLBACK');
+  reserving.release();
+
+  assert.equal((await releasing).status, 'NOT_FOUND');
+  assert.equal(await available(a), 5);
+  const late = await call(inventory, 'ReserveStock', {
+    reservation_id: reservation,
+    items: [{ product_id: a, quantity: 1 }],
+  });
+  assert.equal(late.status, 'ALREADY_RELEASED');
+  assert.equal(await available(a), 5);
+});
+
 test('parallel reserves for the last unit: exactly one wins', async () => {
   const a = randomUUID();
   await call(admin, 'AdjustStock', { product_id: a, change: 1 });

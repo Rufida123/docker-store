@@ -23,6 +23,7 @@ done
 # checks are never read from a replica that may lag (docs/performance.md, 6.6).
 DB_READ_HOST= php artisan migrate --force
 DB_READ_HOST= php artisan db:seed --force
+php artisan rabbitmq:setup
 
 # Refuses to serve with a missing, short or placeholder JWT secret, and
 # announces the push notification status.

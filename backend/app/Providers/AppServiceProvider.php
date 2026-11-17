@@ -3,6 +3,8 @@
 namespace App\Providers;
 
 use App\Shared\Database\ReadRouter;
+use App\Shared\Messaging\EventPublisher;
+use App\Shared\Messaging\RabbitConnection;
 use Closure;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\ServiceProvider;
@@ -14,6 +16,11 @@ class AppServiceProvider extends ServiceProvider
     {
         // One routing decision per request (docs/performance.md, 6.6).
         $this->app->singleton(ReadRouter::class);
+
+        $this->app->singleton(RabbitConnection::class,
+            fn () => new RabbitConnection(config('rabbitmq.connection')));
+        $this->app->singleton(EventPublisher::class,
+            fn ($app) => new EventPublisher($app->make(RabbitConnection::class)));
     }
 
     public function boot(): void
@@ -32,6 +39,8 @@ class AppServiceProvider extends ServiceProvider
         // Push notifications react to order events published after commit.
         \App\Modules\Notifications\NotificationsModule::subscribePushListeners();
 
+        \App\Shared\Messaging\OrderEventsBridge::subscribe();
+
         // Read replica: when a read host is configured, the router decides
         // where this request's reads go (replica or primary).
         if (config('database.connections.pgsql.read')) {
@@ -45,7 +54,7 @@ class AppServiceProvider extends ServiceProvider
         // Performance tests only: X-Query-Count / X-Query-Time-Ms headers.
         // When PERF_QUERY_LOG is off the middleware is not in the stack at all.
         if (config('store.perf.query_log')) {
-            $this->app->make(\Illuminate\Contracts\Http\Kernel::class)
+            $this->app->make(\Illuminate\Foundation\Http\Kernel::class)
                 ->prependMiddleware(\App\Shared\Http\Middleware\QueryCounter::class);
         }
     }

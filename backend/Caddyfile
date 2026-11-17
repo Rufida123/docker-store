@@ -12,5 +12,19 @@
 	# The API never advertises its server software.
 	header -Server
 
+	# Internal URLs (RabbitMQ -> Laravel) do not exist on the public port.
+	@internal path /api/v1/internal/*
+	handle @internal {
+		respond 404
+	}
+
+	handle {
+		php_server
+	}
+}
+
+# Private port: reachable only on the Docker network, never in "ports:".
+:3001 {
+	root * /app/public
 	php_server
 }
