@@ -122,10 +122,11 @@ class OrdersService
      * scheduler; releasing is idempotent on the inventory side, so retrying
      * is always safe.
      */
-    private function releaseOrPark(string $reservationId): void
+    private function releaseOrPark(string $reservationId, array $productIds): void
     {
         try {
             $this->inventory->release($reservationId);
+            $this->products->stockChanged($productIds);
         } catch (Throwable $e) {
             $this->repo->outboxAdd($reservationId);
             Log::warning("release of reservation {$reservationId} failed, parked in the outbox: ".$e->getMessage());
@@ -175,6 +176,11 @@ class OrdersService
             throw new InventoryError("reservation {$orderId} answered with ".$result['status']);
         }
 
+        // The stock is taken: product pages must not show the old quantity
+        // for the rest of the display-stock TTL.
+        $productIds = array_column($items, 'product_id');
+        $this->products->stockChanged($productIds);
+
         try {
             DB::transaction(function () use ($orderId, $user, $lines): void {
                 $this->repo->insertOrder($orderId, $user['id'], $lines);
@@ -189,7 +195,7 @@ class OrdersService
             });
         } catch (Throwable $e) {
             // Saving failed after the stock was taken: give it back.
-            $this->releaseOrPark($orderId);
+            $this->releaseOrPark($orderId, $productIds);
             throw $e;
         }
 
@@ -220,6 +226,7 @@ class OrdersService
 
     /**
      * GET /orders?page=&limit=&status=&user_id=
+     * Every order in the page includes its items (not its history).
      * Customers always get their own orders (a user_id in the query is ignored).
      * Admins get all orders and may filter by user_id.
      */
@@ -250,6 +257,14 @@ class OrdersService
         }
 
         ['rows' => $rows, 'total' => $total] = $this->repo->list($userId, $status, $pagination['limit'], $pagination['offset']);
+
+        // Each order carries its items, all fetched in one query for the
+        // whole page: 3 queries per request whatever the page size.
+        $items = $this->repo->findItemsForOrders(array_column($rows, 'id'));
+        foreach ($rows as &$row) {
+            $row['items'] = $items[$row['id']] ?? [];
+        }
+        unset($row);
 
         return Validation::paginated($rows, $pagination, $total);
     }
@@ -337,10 +352,22 @@ class OrdersService
         try {
             $this->inventory->release($reservationId);
             $this->repo->outboxDelete($reservationId);
+            $this->releasedStock($reservationId);
         } catch (Throwable $e) {
             $this->repo->outboxMarkAttempt($reservationId);
             Log::warning("release of reservation {$reservationId} failed, kept in the outbox: ".$e->getMessage());
         }
+    }
+
+    /**
+     * A release went through: the order's products show their new stock on
+     * the next read. A reservation whose order was never saved (a timed-out
+     * reserve) has no items here; its products catch up within the display
+     * stock TTL (docs/performance.md, 6.4).
+     */
+    private function releasedStock(string $orderId): void
+    {
+        $this->products->stockChanged(array_column($this->repo->findItems($orderId), 'product_id'));
     }
 
     /**
@@ -357,6 +384,7 @@ class OrdersService
             try {
                 $this->inventory->release($reservationId); // idempotent
                 $this->repo->outboxDelete($reservationId);
+                $this->releasedStock($reservationId);
                 $delivered++;
             } catch (Throwable $e) {
                 $this->repo->outboxMarkAttempt($reservationId);

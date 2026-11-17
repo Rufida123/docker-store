@@ -72,6 +72,22 @@ return [
             ],
         ],
 
+        // Product catalog cache: its own Redis connection with short
+        // timeouts and no retries, so a Redis outage costs milliseconds.
+        'catalog' => [
+            'driver' => 'redis',
+            'connection' => 'catalog',
+            'lock_connection' => 'catalog',
+        ],
+
+        // Read routing keys (read-your-writes LSNs, replica status): same
+        // fast-failing connection as the catalog cache.
+        'routing' => [
+            'driver' => 'redis',
+            'connection' => 'catalog',
+            'lock_connection' => 'catalog',
+        ],
+
         'redis' => [
             'driver' => 'redis',
             'connection' => env('REDIS_CACHE_CONNECTION', 'cache'),

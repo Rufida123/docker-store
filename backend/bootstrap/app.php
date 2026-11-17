@@ -30,6 +30,9 @@ return Application::configure(basePath: dirname(__DIR__))
             \Illuminate\Foundation\Http\Middleware\InvokeDeferredCallbacks::class,
             \App\Shared\Http\Middleware\SecurityHeaders::class,
             \App\Shared\Http\Middleware\RejectInvalidJson::class,
+            // Read-your-writes: record a user's write position before the
+            // response leaves (docs/performance.md, 6.6).
+            \App\Shared\Http\Middleware\RecordWrites::class,
         ]);
 
         $middleware->alias([

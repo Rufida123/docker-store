@@ -18,8 +18,11 @@ until php -r '
     sleep 2
 done
 
-php artisan migrate --force
-php artisan db:seed --force
+# Migrations and seeders run on the primary only: with DB_READ_HOST empty
+# Laravel has a single connection, so the migrations table and the seeder's
+# checks are never read from a replica that may lag (docs/performance.md, 6.6).
+DB_READ_HOST= php artisan migrate --force
+DB_READ_HOST= php artisan db:seed --force
 
 # Refuses to serve with a missing, short or placeholder JWT secret, and
 # announces the push notification status.

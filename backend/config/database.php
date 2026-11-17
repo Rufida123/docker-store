@@ -97,7 +97,24 @@ return [
             'prefix_indexes' => true,
             'search_path' => 'public',
             'sslmode' => env('DB_SSLMODE', 'prefer'),
-        ],
+        ] + (env('DB_READ_HOST') ? [
+            // Read replica (docs/performance.md, 6.6). Reads go to the
+            // replica only when App\Shared\Database\ReadRouter allows it;
+            // writes, transactions and reads after a write in the same
+            // request (sticky) always use the primary. Empty DB_READ_HOST:
+            // one connection to the primary (tests, scheduler, perf-tools,
+            // migrations).
+            'read' => [
+                'host' => [env('DB_READ_HOST')],
+                // Fail fast when the replica is unreachable: the router then
+                // falls back to the primary.
+                'options' => [PDO::ATTR_TIMEOUT => (int) env('DB_READ_CONNECT_TIMEOUT', 2)],
+            ],
+            'write' => [
+                'host' => [env('DB_HOST', '127.0.0.1')],
+            ],
+            'sticky' => true,
+        ] : []),
 
         'sqlsrv' => [
             'driver' => 'sqlsrv',
@@ -164,6 +181,20 @@ return [
             'backoff_algorithm' => env('REDIS_BACKOFF_ALGORITHM', 'decorrelated_jitter'),
             'backoff_base' => env('REDIS_BACKOFF_BASE', 100),
             'backoff_cap' => env('REDIS_BACKOFF_CAP', 1000),
+        ],
+
+        // Catalog cache (config/cache.php 'catalog'): fail fast when Redis
+        // is down instead of retrying, the database is the fallback.
+        'catalog' => [
+            'url' => env('REDIS_URL'),
+            'host' => env('REDIS_HOST', '127.0.0.1'),
+            'username' => env('REDIS_USERNAME'),
+            'password' => env('REDIS_PASSWORD'),
+            'port' => env('REDIS_PORT', '6379'),
+            'database' => env('REDIS_CATALOG_DB', '2'),
+            'timeout' => (float) env('REDIS_CATALOG_TIMEOUT', 0.3),
+            'read_timeout' => (float) env('REDIS_CATALOG_READ_TIMEOUT', 0.5),
+            'max_retries' => 0,
         ],
 
         'cache' => [

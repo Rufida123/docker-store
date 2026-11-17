@@ -2,6 +2,7 @@
 
 namespace App\Modules\Users;
 
+use App\Shared\Database\Sql;
 use App\Shared\Time;
 use Illuminate\Support\Facades\DB;
 
@@ -12,7 +13,7 @@ class UsersRepository
 {
     public function create(string $email, string $passwordHash, string $role): array
     {
-        $rows = DB::select(
+        $rows = Sql::returning(
             'INSERT INTO users (email, password_hash, role)
              VALUES (?, ?, ?)
              RETURNING id, email, role, created_at',

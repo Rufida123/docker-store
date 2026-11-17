@@ -150,6 +150,35 @@ Two admins cancelling at once: the row lock serialises them, the loser sees
 `cancelled` and gets `409 INVALID_STATUS_TRANSITION`; only the winner wrote the
 outbox row, and releasing is idempotent anyway — stock comes back exactly once.
 
+### Restock (admin)
+
+```mermaid
+sequenceDiagram
+    participant FE as Admin UI
+    participant BE as Laravel
+    participant INV as Inventory
+
+    FE->>BE: PATCH /api/v1/products/:id/stock {change: 25}
+    BE->>BE: validate (non-zero integer), 404 for unknown products
+    BE->>INV: AdjustStock(id, change)   [InventoryAdmin]
+    alt APPLIED
+        INV-->>BE: available
+        BE-->>FE: 200 {..., stock: available}
+    else REFUSED (would go below zero)
+        BE-->>FE: 409 INSUFFICIENT_STOCK {available}
+    else UNAVAILABLE / DEADLINE_EXCEEDED
+        BE-->>FE: 503 INVENTORY_UNAVAILABLE / 504 INVENTORY_TIMEOUT
+    end
+```
+
+- The change is **relative** (`+25`, `-3`), applied by the inventory in one
+  `UPDATE`, so restocking is safe while customers are reserving.
+- Creating a product with `stock > 0` calls `AdjustStock` inside the product's
+  DB transaction: if the inventory is down or slow, the product isn't created
+  (503 / 504) and the uploaded image is removed.
+- `AdjustStock` has **no idempotency key**. After a 504 the change may or may
+  not have landed, so check the product's stock before retrying.
+
 ## Why it can never oversell, leak or double-release
 
 - **Race on the last unit**: the inventory decrements with
@@ -177,6 +206,22 @@ outbox row, and releasing is idempotent anyway — stock comes back exactly once
   `ALREADY_RELEASED` and the row is dropped. This is **eventual consistency**:
   the moment something fails, stock may be reserved a little longer than
   necessary, but it always comes back, exactly once.
+
+## Data model
+
+Inventory database (`inventory-service/migrations/001_schema.sql`, applied by
+the service on start):
+
+| Table | Purpose |
+|---|---|
+| `stock` | `product_id` → `available`, with `CHECK (available >= 0)` |
+| `reservations` | one row per order id, `status` = `reserved` or `released`; a `released` row with no items is a tombstone |
+| `reservation_items` | the lines of a reservation (`product_id`, `quantity > 0`), what a release gives back |
+
+Main database: the `products` table has **no stock column** any more (dropped
+by `0001_01_02_000001_move_stock_to_inventory_service.php`). The same migration
+creates `inventory_outbox` (`reservation_id` primary key, `action = 'release'`,
+`created_at`, `last_attempt_at`): releases still waiting to be delivered.
 
 ## Running the proofs (demo)
 
@@ -214,3 +259,70 @@ clear PASS/FAIL table.
    or blocked by its tombstone; `inventory:flush-outbox` clears the parked row).
 
 Screenshots of the frontend in each state are in `docs/proofs/screenshots/`.
+
+## Configuration
+
+| Variable | Where | Default | Meaning |
+|---|---|---|---|
+| `INVENTORY_GRPC_ADDR` | backend | `localhost:50051` (`inventory:50051` in Docker) | address of the inventory service |
+| `INVENTORY_TIMEOUT_MS` | backend | `2000` | deadline of every call (`grpc-timeout`) |
+| `INVENTORY_CONNECT_TIMEOUT_MS` | backend | `500` | how long to wait for the connection; a stopped service fails this fast |
+| `DATABASE_URL` | inventory | — | the inventory's own PostgreSQL database |
+| `INVENTORY_LISTEN_ADDR` | inventory | `0.0.0.0:50051` | listen address of the gRPC server |
+| `SIMULATE_DELAY_MS` | inventory | `0` | demo only: delays every call, to show the deadline |
+| `TEST_DATABASE_URL` | inventory tests | `DATABASE_URL` with the database renamed `inventory_test` | database the test suite truncates |
+
+The backend reads its values through `config/store.php` (`store.inventory.*`).
+
+## Changing the contract
+
+1. Edit `proto/inventory/v1/inventory.proto`. Keep it backwards compatible:
+   add new fields with **new** numbers, never renumber or reuse a field, and
+   keep `STATUS_UNSPECIFIED = 0` first in every enum.
+2. Regenerate the PHP classes (they are committed):
+
+       protoc --php_out=backend/generated --proto_path=proto proto/inventory/v1/inventory.proto
+
+3. The Node service needs no build step: it loads the `.proto` at start-up.
+   Implement the change in `inventory-service/src/handlers.js` /
+   `service.js`, and in `backend/app/Modules/Inventory/InventoryModule.php`.
+4. Run both test suites (below).
+
+A change that breaks the wire format (renaming a field's number, changing its
+type) goes into a new package, `inventory.v2`, next to `v1`.
+
+## Calling it by hand (grpcurl)
+
+Port 50051 is published by `docker-compose.yml` for demos. The server has no
+reflection, so pass the `.proto`:
+
+    grpcurl -plaintext -import-path proto -proto inventory/v1/inventory.proto \
+      -d '{"product_ids": ["<product uuid>"]}' \
+      localhost:50051 inventory.v1.Inventory/GetStock
+
+    grpcurl -plaintext -import-path proto -proto inventory/v1/inventory.proto \
+      -d '{"reservation_id": "<new uuid>", "items": [{"product_id": "<product uuid>", "quantity": 1}]}' \
+      localhost:50051 inventory.v1.Inventory/ReserveStock
+
+    grpcurl -plaintext -import-path proto -proto inventory/v1/inventory.proto \
+      -d '{"reservation_id": "<same uuid>"}' \
+      localhost:50051 inventory.v1.Inventory/ReleaseStock
+
+An empty `GetStock` (`-d '{}'`) is a cheap health probe. Don't reserve with
+the id of a real order: you'd hold its stock outside the app's bookkeeping.
+
+## Tests
+
+- **Inventory service** — `cd inventory-service && npm test`: integration
+  tests against a real PostgreSQL and the real gRPC server on a random port
+  (all-or-nothing, idempotent replay, double release, tombstones, 10 parallel
+  reserves for one unit, opposite-order multi-item reserves without deadlock,
+  `INVALID_ARGUMENT` for bad input). They always use a separate
+  `inventory_test` database.
+- **Backend** — `cd backend && php artisan test`:
+  - `Feature/OrderCompensationTest.php`: a failed order save releases the
+    reservation; a failed release is parked in the outbox and flushed later;
+    a cancel parks and delivers its release.
+  - `Architecture/ModuleBoundariesTest.php`
+    (`--testsuite=Architecture`): modules only use each other's public class,
+    so nothing reaches the inventory except through `InventoryModule`.

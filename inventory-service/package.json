@@ -5,7 +5,8 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test"
+    "test": "node --test",
+    "seed:perf": "node src/seed-perf.js"
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.12.0",
