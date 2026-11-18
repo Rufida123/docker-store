@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 import { api, getStoredAuth, storeAuth, STORAGE_KEY } from '../api/client';
 import { clearCache } from '../hooks/useQuery';
 import { releasePush } from '../push/push';
+import { closeRealtime } from '../realtime/stompClient';
 
 const AuthContext = createContext(null);
 export const useAuth = () => useContext(AuthContext);
@@ -32,12 +33,14 @@ export function AuthProvider({ children }) {
   const logout = useCallback(() => {
     // This browser stops receiving the account's push notifications (sent before the token is cleared).
     releasePush(getStoredAuth()?.token);
+    closeRealtime(); // the live connection belongs to this session only
     storeAuth(null);
     clearCache(); // never leak one user's cached data to the next
     setAuth(null);
   }, []);
 
   const expire = useCallback(() => {
+    closeRealtime();
     clearCache();
     setAuth(null);
     setSessionExpired(true);

@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Autocomplete,
@@ -26,6 +26,7 @@ import InboxIcon from '@mui/icons-material/InboxOutlined';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import { useAuth } from '../context/AuthContext';
 import { prefetchOrders, useOrders, useUsers } from '../hooks/queries';
+import { useAdminOrdersFeed } from '../realtime/useAdminOrdersFeed';
 import PageHeader from '../components/PageHeader';
 import StatusChip from '../components/StatusChip';
 import ErrorAlert from '../components/ErrorAlert';
@@ -55,6 +56,14 @@ export default function Orders() {
   const { data, error, loading, fetching, placeholder, refetch } = useOrders(query);
   const { items, total, totalPages } = normalizeList(data || {});
 
+  // Admin only: new orders and status changes arrive live (Web-STOMP) and are merged into the list.
+  // A live order is shown only where it belongs: first page and matching the filters.
+  const accept = useCallback(
+    (o) => page === 1 && (!status || o.status === status) && (!userId || o.user_id === userId),
+    [page, status, userId]
+  );
+  const { orders: rows, connected } = useAdminOrdersFeed({ enabled: isAdmin, items, accept });
+
   // Admins see who each order belongs to, and can filter by picking a customer.
   const users = useUsers({ enabled: isAdmin });
   const userMap = useMemo(() => new Map((users.data || []).map((u) => [u.id, u])), [users.data]);
@@ -70,7 +79,7 @@ export default function Orders() {
   }, [data, placeholder, page, totalPages]);
 
   const filtered = Boolean(status || userId);
-  const empty = !loading && !error && items.length === 0;
+  const empty = !loading && !error && rows.length === 0;
   const selectedUser = userId ? userMap.get(userId) || { id: userId, email: shortId(userId) } : null;
 
   return (
@@ -79,7 +88,14 @@ export default function Orders() {
         title={isAdmin ? 'All orders' : 'My orders'}
         subtitle={isAdmin ? 'Review and update every customer order.' : 'Track everything you have ordered.'}
         action={
-          !isAdmin && (
+          isAdmin ? (
+            <Chip
+              size="small"
+              variant="outlined"
+              color={connected ? 'success' : 'default'}
+              label={connected ? 'Live' : 'Live updates unavailable'}
+            />
+          ) : (
             <Button variant="contained" startIcon={<AddIcon />} onClick={() => navigate('/orders/new')}>
               New order
             </Button>
@@ -164,7 +180,7 @@ export default function Orders() {
                 </TableRow>
               </TableHead>
               <TableBody>
-                {items.map((o) => (
+                {rows.map((o) => (
                   <TableRow
                     key={o.id}
                     hover

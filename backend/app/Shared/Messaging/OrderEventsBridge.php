@@ -36,6 +36,10 @@ final class OrderEventsBridge
 
     private static function send(array $messages): void
     {
+        if (! config('store.events.publish', true)) {
+            return;
+        }
+
         try {
             app(EventPublisher::class)->publishMany($messages);
         } catch (Throwable $e) {

@@ -157,7 +157,7 @@ services:
 
   # Message broker for order events (workers) and real-time updates (browsers
   # over Web-STOMP). Browser logins are checked by Laravel through the HTTP
-  # auth backend (rabbitmq/rabbitmq.conf).
+  # auth backend (rabbitmq/rabbitmq.config).
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
     container_name: laravel_rabbitmq
@@ -167,7 +167,7 @@ services:
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
     volumes:
       - rabbitmq_data_laravel:/var/lib/rabbitmq
-      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - ./rabbitmq/rabbitmq.config:/etc/rabbitmq/rabbitmq.conf:ro
       - ./rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
     ports:
       - "15672:15672"   # management UI (demo and proofs)

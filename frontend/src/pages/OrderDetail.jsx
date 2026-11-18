@@ -4,6 +4,7 @@ import {
   Box,
   Button,
   Card,
+  Chip,
   Divider,
   IconButton,
   Link,
@@ -24,6 +25,7 @@ import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { invalidate } from '../hooks/useQuery';
 import { orderUpdated, useCatalog, useOrder, useUsers } from '../hooks/queries';
+import { useOrderTracking } from '../realtime/useOrderTracking';
 import { useToast } from '../components/Toast';
 import PageHeader from '../components/PageHeader';
 import StatusChip from '../components/StatusChip';
@@ -58,6 +60,10 @@ export default function OrderDetail() {
 
   const validId = UUID_RE.test(id);
   const { data: order, loading, error, refetch } = useOrder(id, { enabled: validId });
+
+  // Live status: subscribe once the order was loaded over REST. A final order can no longer change.
+  const finalStatus = order?.status === 'delivered' || order?.status === 'cancelled';
+  const { connected } = useOrderTracking(id, { enabled: validId && Boolean(order) && !finalStatus });
 
   // Item lines may only carry product ids: resolve names from the shared catalog cache.
   const items = Array.isArray(order?.items) ? order.items : [];
@@ -139,7 +145,19 @@ export default function OrderDetail() {
           <PageHeader
             title={`Order #${shortId(order.id)}`}
             subtitle={`Placed ${formatDate(order.created_at || order.createdAt)}`}
-            action={<StatusChip status={order.status} size="medium" />}
+            action={
+              <Stack direction="row" spacing={1} alignItems="center">
+                {!finalStatus && (
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    color={connected ? 'success' : 'default'}
+                    label={connected ? 'Live' : 'Live updates unavailable'}
+                  />
+                )}
+                <StatusChip status={order.status} size="medium" />
+              </Stack>
+            }
           />
 
           <Card sx={{ p: { xs: 2, sm: 3 }, mb: 3 }}>
